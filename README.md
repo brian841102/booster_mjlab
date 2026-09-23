@@ -30,6 +30,19 @@ The last command syncs the environment and prints every registered task.
 
 Train a Booster K1 to follow velocity commands on flat terrain. The reward has been tuned to work together with AMP reference motions.
 The default [motion dataset](https://huggingface.co/datasets/whirlwind-ams/lafan_locomotion_k1) contains a few locomotion clips retargeted from [LAFAN1](https://github.com/ubisoft/ubisoft-laforge-animation-dataset).
+It is a small curated subset, not the full LAFAN1 collection: 7 clips (~4 min total) cut from two source
+trials, `run2_subject1` and `walk3_subject2`, each split into several segments. Both trials include natural
+left and right turns, not just straight-line walking/running.
+
+| Clip | Source trial | Frames | Duration (s) |
+|---|---|---|---|
+| `run2_subject1_05` | `run2_subject1` | 1068 | 35.6 |
+| `run2_subject1_06` | `run2_subject1` | 670 | 22.3 |
+| `run2_subject1_07` | `run2_subject1` | 1255 | 41.8 |
+| `walk3_subject2_01` | `walk3_subject2` | 470 | 15.7 |
+| `walk3_subject2_02` | `walk3_subject2` | 2332 | 77.7 |
+| `walk3_subject2_03` | `walk3_subject2` | 316 | 10.5 |
+| `walk3_subject2_04` | `walk3_subject2` | 998 | 33.3 |
 
 ```bash
 uv run train Mjlab-Velocity-Flat-Amp-DA-Muon-Booster-K1 --env.scene.num-envs 4096
