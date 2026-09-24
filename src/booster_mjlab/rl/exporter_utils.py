@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import onnx
+import torch
 
 from mjlab.actuator.pd_actuator import IdealPdActuator
 from mjlab.entity import Entity
@@ -72,7 +73,7 @@ def get_base_metadata(
     """Build ONNX metadata, fixing PD gains for python-PD-backed actuators."""
     robot: Entity = env.scene["robot"]
     md = _mjlab_get_base_metadata(env, run_path)
-    _remove_passive_joints_from_metadata(robot, md)
+    _remove_passive_joints_from_metadata(robot, md, env)
 
     if not any(isinstance(a, IdealPdActuator) for a in robot.actuators):
         return md
@@ -104,7 +105,27 @@ def get_base_metadata(
     return md
 
 
-def _remove_passive_joints_from_metadata(robot: Entity, md: dict) -> None:
+def _action_scale_by_joint(env: ManagerBasedRlEnv) -> dict[str, float]:
+    """Map joint name -> action scale, across *every* action term."""
+    scales: dict[str, float] = {}
+    for term_name in env.action_manager.active_terms:
+        term = env.action_manager.get_term(term_name)
+        target_names = getattr(term, "target_names", None)
+        scale = getattr(term, "scale", None)
+        if target_names is None or scale is None:
+            continue
+        if isinstance(scale, torch.Tensor):
+            values = scale[0].detach().cpu().tolist()
+        else:
+            values = [float(scale)] * len(target_names)
+        for name, value in zip(target_names, values, strict=True):
+            scales[name] = float(value)
+    return scales
+
+
+def _remove_passive_joints_from_metadata(
+    robot: Entity, md: dict, env: ManagerBasedRlEnv
+) -> None:
     """Align joint metadata with the entity's naturally ordered actuated joints."""
     actuated_names = {
         name for actuator in robot.actuators for name in actuator.target_names
@@ -117,6 +138,19 @@ def _remove_passive_joints_from_metadata(robot: Entity, md: dict) -> None:
     md["default_joint_pos"] = (
         robot.data.default_joint_pos[0, actuated_ids].cpu().tolist()
     )
+
+    # mjlab's own metadata only reads the "joint_pos" action term's scale,
+    # which is correct for a robot with a single, all-joint action term
+    # (e.g. K1) but silently drops any joints driven by a *second* term --
+    # e.g. a wheeled robot's velocity-controlled wheels, which live in their
+    # own JointVelocityActionCfg term. Rebuild action_scale by joint name
+    # across every action term so it covers the same joints as the other
+    # (already complete) metadata fields.
+    action_scale_by_joint = _action_scale_by_joint(env)
+    if set(md["joint_names"]) <= action_scale_by_joint.keys():
+        md["action_scale"] = [
+            action_scale_by_joint[name] for name in md["joint_names"]
+        ]
 
     joint_field_lengths = {
         key: len(md[key])
