@@ -112,16 +112,32 @@ MotionAugmentationSpec = str | Mapping[str, Any] | MotionAugmentation
 @dataclass(frozen=True)
 class MirrorAugmentation:
     name: str = "mirror"
+    robot: str = "k1"
+    """Joint layout of the clips: "k1" (22 DOF, default) or "nemov3" (32 DOF, NEMOV3_JOINT_ORDER)."""
 
-    def apply(self, motion_file: MotionFile) -> MotionFile:
-        num_dof = motion_file.dof_pos.shape[1]
-        if num_dof != len(_K1_INDEX_MAP):
-            raise ValueError(
-                "Mirror augmentation currently expects K1 DOF ordering with "
-                f"{len(_K1_INDEX_MAP)} joints, but got {num_dof} joints."
+    def _maps(self) -> tuple[Any, Any]:
+        if self.robot == "k1":
+            return _K1_INDEX_MAP, _K1_SIGN_MAP
+        if self.robot == "nemov3":
+            from booster_mjlab.robots.nemov3.nemov3_constants import (
+                NEMOV3_JOINT_ORDER,
+                nemov3_mirror_maps,
             )
 
-        flipped_dof_pos = motion_file.dof_pos[:, _K1_INDEX_MAP] * _K1_SIGN_MAP
+            index_map, sign_map = nemov3_mirror_maps(NEMOV3_JOINT_ORDER)
+            return np.array(index_map), np.array(sign_map, dtype=np.float32)
+        raise ValueError(f"Unknown mirror robot layout '{self.robot}'.")
+
+    def apply(self, motion_file: MotionFile) -> MotionFile:
+        index_map, sign_map = self._maps()
+        num_dof = motion_file.dof_pos.shape[1]
+        if num_dof != len(index_map):
+            raise ValueError(
+                f"Mirror augmentation for '{self.robot}' expects {len(index_map)} "
+                f"joints, but got {num_dof} joints."
+            )
+
+        flipped_dof_pos = motion_file.dof_pos[:, index_map] * sign_map
 
         flipped_root_pos = motion_file.root_pos.copy()
         flipped_root_pos[:, 1] = -flipped_root_pos[:, 1]
@@ -258,7 +274,7 @@ def build_motion_augmentations(
             normalized_name = normalized_name[: -len("augmentation")]
 
         if normalized_name in {"mirror", "mirror_lr", "left_right_mirror"}:
-            augmentations.append(MirrorAugmentation())
+            augmentations.append(MirrorAugmentation(robot=str(kwargs.get("robot", "k1"))))
             continue
 
         if normalized_name == "speed":
