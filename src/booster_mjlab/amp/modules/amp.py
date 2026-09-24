@@ -422,6 +422,7 @@ def construct_amp(
     include_base_lin_vel = "base_lin_vel" in amp_term_names
     include_base_ang_vel = "base_ang_vel" in amp_term_names
     include_projected_gravity = "projected_gravity" in amp_term_names
+    include_joint_vel = "joint_vel" in amp_term_names
 
     amp_loader = MotionLoader(
         dataset_root=cfg["dataset_root"],
@@ -436,6 +437,7 @@ def construct_amp(
         include_base_lin_vel=include_base_lin_vel,
         include_base_ang_vel=include_base_ang_vel,
         include_projected_gravity=include_projected_gravity,
+        include_joint_vel=include_joint_vel,
         device=device,
     )
 

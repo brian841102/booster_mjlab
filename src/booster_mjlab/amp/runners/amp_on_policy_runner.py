@@ -23,6 +23,8 @@ class AmpRslRlPpoAlgorithmCfg(RslRlPpoAlgorithmCfg):
 
     class_name: str = "booster_mjlab.amp.algorithms.amp_ppo:AmpPPO"
     """Fully qualified class name for the AMP PPO implementation."""
+    grad_penalty_lambda: float = 10.0
+    """Weight of the discriminator's gradient penalty (on expert samples)."""
 
 
 @dataclass
@@ -45,6 +47,13 @@ class AmpOnPolicyRunnerCfg(RslRlOnPolicyRunnerCfg):
     Optimizer state and the iteration counter start fresh, so a checkpoint can seed a run with a
     different optimizer (e.g. Adam -> Muon) or a different training setup. Without this flag,
     ``resume`` restores everything and the run continues where it left off.
+    """
+    reset_discriminator: bool = False
+    """With ``resume``, load only the actor, critic and iteration counter; the discriminator (and optimizer) start
+    fresh. Needed when the AMP feature set changed, so the discriminator input size no longer matches the checkpoint.
+    Expect a transient while the new discriminator learns: in the nemov3 runs (tools/nemov3_finetune.md, Exp 37 / 38
+    / 40) leg swing and speed tracking dropped for the first ~100 iterations and recovered by ~200, so don't use
+    checkpoints from the first ~100 iterations after the reset.
     """
     class_name: str = "AmpOnPolicyRunner"
     """The runner class name. Default is AmpOnPolicyRunner."""
@@ -109,6 +118,17 @@ class AmpOnPolicyRunner(AmpRunner, MjlabOnPolicyRunner):
         strict: bool = True,
         map_location: str | None = None,
     ) -> dict:
+        if load_cfg is None and self.cfg.get("reset_discriminator", False):
+            print(
+                "[INFO] reset_discriminator: loading actor, critic and iteration counter only; "
+                "discriminator and optimizer start fresh."
+            )
+            load_cfg = {
+                "actor": True,
+                "critic": True,
+                "iteration": True,
+                "discriminator": False,
+            }
         if load_cfg is None and self.cfg.get("warm_start", False):
             print(
                 "[INFO] Warm start: loading actor, critic and discriminator weights only; "

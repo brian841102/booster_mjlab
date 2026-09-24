@@ -34,6 +34,7 @@ class AmpPPO(PPO):
         storage: RolloutStorage,
         amp: AMP,
         use_smooth_ratio_clipping: bool = False,
+        grad_penalty_lambda: float = 10.0,
         use_muon: bool = False,
         muon_weight_decay: float = 0.0,
         muon_momentum: float = 0.95,
@@ -46,6 +47,7 @@ class AmpPPO(PPO):
         )
         self.amp = amp
         self.use_smooth_ratio_clipping = use_smooth_ratio_clipping
+        self.grad_penalty_lambda = grad_penalty_lambda
 
         # Rebuild optimizer to include discriminator parameters alongside actor+critic
         params = [
@@ -292,7 +294,7 @@ class AmpPPO(PPO):
             amp_loss, grad_pen_loss, amp_metrics = self.amp.compute_discriminator_batch(
                 sample_amp_policy,
                 sample_amp_expert,
-                grad_penalty_lambda=10.0,
+                grad_penalty_lambda=self.grad_penalty_lambda,
             )
 
             total_loss = loss + amp_loss + grad_pen_loss
@@ -405,7 +407,9 @@ class AmpPPO(PPO):
 
     def load(self, loaded_dict: dict, load_cfg: dict | None, strict: bool) -> bool:
         """Load specified models from a saved dict."""
-        if "discriminator_state_dict" in loaded_dict:
+        if "discriminator_state_dict" in loaded_dict and (
+            load_cfg is None or load_cfg.get("discriminator", True)
+        ):
             self.amp.discriminator.load_state_dict(
                 loaded_dict["discriminator_state_dict"], strict=strict
             )

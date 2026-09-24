@@ -55,6 +55,7 @@ def _filter_joint_obs(
     include_base_lin_vel: bool,
     include_base_ang_vel: bool,
     include_projected_gravity: bool = False,
+    include_joint_vel: bool = True,
 ) -> torch.Tensor:
     """Project AMP observations onto the configured discriminator features.
 
@@ -62,7 +63,7 @@ def _filter_joint_obs(
     ``[joint_pos (J), joint_vel (J), base_lin_vel (3), base_ang_vel (3), projected_gravity (3)]``.
     The AMP env config may use all joints or a subset, may drop either base-velocity block independently, and may
     include the body-frame projected gravity. The output order matches the env's AMP observation group:
-    ``[joint_pos, joint_vel, (base_lin_vel), (base_ang_vel), (projected_gravity)]``.
+    ``[joint_pos, (joint_vel), (base_lin_vel), (base_ang_vel), (projected_gravity)]``.
     """
     joint_pos = obs[:, :full_joint_dim]
     joint_vel = obs[:, full_joint_dim : 2 * full_joint_dim]
@@ -71,7 +72,9 @@ def _filter_joint_obs(
         joint_vel = joint_vel[:, joint_indices]
 
     base_start = 2 * full_joint_dim
-    obs_terms = [joint_pos, joint_vel]
+    obs_terms = [joint_pos]
+    if include_joint_vel:
+        obs_terms.append(joint_vel)
     if include_base_lin_vel:
         obs_terms.append(obs[:, base_start : base_start + 3])
     if include_base_ang_vel:
@@ -108,6 +111,7 @@ class MotionLoader:
         include_base_lin_vel: bool = True,
         include_base_ang_vel: bool = True,
         include_projected_gravity: bool = False,
+        include_joint_vel: bool = True,
         device: torch.device = torch.device("cpu"),
     ) -> None:
         self.device = device
@@ -128,6 +132,7 @@ class MotionLoader:
         self.include_base_lin_vel = include_base_lin_vel
         self.include_base_ang_vel = include_base_ang_vel
         self.include_projected_gravity = include_projected_gravity
+        self.include_joint_vel = include_joint_vel
 
         self.motion_data: List[MotionData] = []
         self.motion_weights: List[float] = []
@@ -186,6 +191,7 @@ class MotionLoader:
                     self.include_base_lin_vel,
                     self.include_base_ang_vel,
                     self.include_projected_gravity,
+                    self.include_joint_vel,
                 )
 
                 if self.default_pose is not None:
