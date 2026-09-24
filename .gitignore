@@ -21,3 +21,6 @@ logs/
 .ruff_cache/
 
 .vscode/
+
+# MuJoCo warning log (written to the working directory whenever the sim emits a warning)
+MUJOCO_LOG.TXT
