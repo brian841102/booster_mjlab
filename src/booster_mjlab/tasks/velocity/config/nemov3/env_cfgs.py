@@ -122,6 +122,11 @@ FOOT_LIFT_SHAPED_WEIGHTS = {"lift": 2.0, "swing_height": -1.0}
 HIP_ROLL_LIMIT_RAD = 0.14
 HIP_ROLL_SPREAD_WEIGHT = -100.0
 
+# Turning variant (turn=True): the yaw-rate command is sampled from [-TURN_YAW_RATE_MAX, TURN_YAW_RATE_MAX]
+# rad/s, i.e. left and right turns (user request: turning at 0~1.3 rad/s; Exp 41+). The straight-line tasks keep
+# the yaw-rate command at 0.
+TURN_YAW_RATE_MAX = 1.3
+
 # Symmetric-default variant (symmetric_default=True): HOME_KEYFRAME's hip yaw is -0.09 (left) /
 # -0.06 (right), the per-clip mean of the unmirrored references. Joint positions are observed
 # relative to the default and actions are offsets from it, so this asymmetry breaks the
@@ -162,8 +167,12 @@ def nemov3_flat_env_cfg(
     foot_lift: bool | str = False,
     narrow_stance: bool = False,
     symmetric_default: bool = False,
+    turn: bool = False,
 ) -> ManagerBasedRlEnvCfg:
     """Create Nemov3 flat-terrain velocity tracking configuration.
+
+    With ``turn=True`` the yaw-rate command is sampled from [-TURN_YAW_RATE_MAX, TURN_YAW_RATE_MAX] rad/s (left
+    and right turns) instead of being pinned to 0.
 
     With ``narrow_stance=True`` adds a hip-roll upper-limit penalty so the feet do not spread
     (see the note at ``HIP_ROLL_LIMIT_RAD``: may need to be removed for foot-lift training).
@@ -267,10 +276,11 @@ def nemov3_flat_env_cfg(
 
     cfg.viewer.body_name = TRUNK_BODY
 
-    # Command: pinned to straight-line forward only, 0-1.3 m/s. No lateral,
-    # no yaw, no heading-seeking behavior, and no curriculum widening (the
-    # base config's "command_vel" curriculum progressively opens up lateral
-    # and yaw ranges, which we deliberately don't want here).
+    # Command: forward only, 0-1.3 m/s; yaw rate 0 (straight line) unless turn=True (turning). No
+    # lateral, no heading-seeking behavior, and no curriculum widening (the base config's "command_vel"
+    # curriculum progressively opens up lateral and yaw ranges, which we deliberately don't want here).
+    # Of the envs, rel_standing_envs (10 %) stand and rel_forward_envs (10 %, base config) go straight
+    # with zero yaw rate, so the straight-line gait keeps being trained when turning is on.
     assert cfg.commands is not None
     twist_cmd = cfg.commands["twist"]
     assert isinstance(twist_cmd, mdp.UniformVelocityCommandCfg)
@@ -278,7 +288,7 @@ def nemov3_flat_env_cfg(
     twist_cmd.rel_standing_envs = 0.1
     twist_cmd.ranges.lin_vel_x = (0.0, 1.3)
     twist_cmd.ranges.lin_vel_y = (0.0, 0.0)
-    twist_cmd.ranges.ang_vel_z = (0.0, 0.0)
+    twist_cmd.ranges.ang_vel_z = (-TURN_YAW_RATE_MAX, TURN_YAW_RATE_MAX) if turn else (0.0, 0.0)
     twist_cmd.ranges.heading = None
 
     # Events.
@@ -473,8 +483,9 @@ def nemov3_flat_env_cfg(
         push_robot = cfg.events["push_robot"]
         push_robot.func = push_if_enabled
         push_robot.params["command_name"] = "play_controls"
-        # viser's joystick GUI needs max > 0 on every axis (slider min is 0.1).
+        # viser's joystick GUI needs max > 0 on every axis (slider min is 0.1); its sliders span +-max.
         twist_cmd.ranges.lin_vel_y = (0.0, 0.1)
-        twist_cmd.ranges.ang_vel_z = (0.0, 0.1)
+        if not turn:
+            twist_cmd.ranges.ang_vel_z = (0.0, 0.1)
 
     return cfg

@@ -148,6 +148,14 @@ _register(
     {"mirror": True, "mirror_loss_coeff": NEMOV3_MIRROR_LOSS_COEFF},
     NEMOV3_AMP_ARM_JOINT_NAMES,
 )
+# Baseline (Exp 33) config + left/right turning: yaw-rate command in +-TURN_YAW_RATE_MAX (1.3 rad/s, Exp 41+). The reference
+# clips are straight-line only; the command mirror (vx, -vy, -wz) makes the mirror loss map left turns to right turns.
+_register(
+    "-Clock-Arms-NarrowStance-Mirror-SymLoss-Turn",
+    {**_NARROW, "symmetric_default": True, "turn": True},
+    {"mirror": True, "mirror_loss_coeff": NEMOV3_MIRROR_LOSS_COEFF},
+    NEMOV3_AMP_ARM_JOINT_NAMES,
+)
 # + reference clips made left/right symmetric one by one (Exp 36+).
 _register(
     "-Clock-Arms-NarrowStance-SymClips-SymLoss",
