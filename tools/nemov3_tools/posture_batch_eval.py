@@ -10,6 +10,8 @@ dropped; statistics per episode, then averaged over the episodes that did not fa
   base dx / dy      mean root offset from the wheel midpoint (cm)
   torso pitch       mean pitch of link_torso from gravity (deg; + = leaning forward)
   speed             mean forward speed in the heading frame (m/s)
+  yaw rate          std of the base yaw rate (deg/s): twisting / wandering in place (most telling at cmd 0)
+  joint vel         RMS joint velocity over all position joints (rad/s): how much the body keeps moving
 """
 
 import os
@@ -58,6 +60,7 @@ def main():
     )
     wr, wl = robot.body_names.index("right_wheel_link"), robot.body_names.index("left_wheel_link")
     torso = robot.body_names.index("link_torso")
+    pos_ids = [i for i, nm in enumerate(robot.joint_names) if "wheel" not in nm]
     gravity_w = torch.tensor([0.0, 0.0, -1.0], device="cuda:0").expand(n, 3)
 
     for c in cmds:
@@ -81,14 +84,19 @@ def main():
                 g = quat_apply_inverse(d.body_link_quat_w[:, torso], gravity_w)
                 pitch = torch.rad2deg(torch.atan2(-g[:, 0], -g[:, 2]))
                 vel = quat_apply_inverse(heading, d.root_link_lin_vel_w)
-                rows.append(torch.stack([split[:, 0], com[:, 1], base[:, 0], base[:, 1], pitch, vel[:, 0]], 1).cpu().numpy())
+                yaw_rate = torch.rad2deg(d.root_link_ang_vel_w[:, 2])
+                qd_rms = d.joint_vel[:, pos_ids].square().mean(1).sqrt()
+                rows.append(
+                    torch.stack([split[:, 0], com[:, 1], base[:, 0], base[:, 1], pitch, vel[:, 0], yaw_rate, qd_rms], 1).cpu().numpy()
+                )
         x = np.stack(rows, 1)  # [env, time, quantity]
         ok = alive.cpu().numpy()
         xs = x[ok]
         print(
             f"PB {tag} cmd {c:.2f} (fell {int((~ok).sum())}/{n}) | wheel split std {xs[:, :, 0].std(1).mean() * 100:.1f} cm | "
             f"CoM dy std {xs[:, :, 1].std(1).mean() * 100:.2f} cm | base dx {xs[:, :, 2].mean() * 100:+.1f} dy {xs[:, :, 3].mean() * 100:+.1f} cm | "
-            f"torso pitch {xs[:, :, 4].mean():+.1f} deg | speed {xs[:, :, 5].mean():.2f} m/s",
+            f"torso pitch {xs[:, :, 4].mean():+.1f} deg | speed {xs[:, :, 5].mean():.2f} m/s | "
+            f"yaw rate std {xs[:, :, 6].std(1).mean():.1f} deg/s | joint vel rms {xs[:, :, 7].mean():.2f} rad/s",
             flush=True,
         )
     env.close()

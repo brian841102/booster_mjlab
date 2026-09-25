@@ -4,7 +4,8 @@ nemov3 实验评估脚本（在仓库根目录运行，`.venv/bin/python3 tools/
 直接载入 checkpoint（`.pt`，用 play 的方式建策略），多环境批量跑，逐 episode 统计。
 
 - `sym_batch_eval.py <task> <ckpt.pt> [envs=32] [cmds] [steps=750] [tag]` — **对称性评估（以它为准）**：用 play 的方式加载 checkpoint，每个速度同时跑 `envs` 个 episode；逐 episode 的节奏比（另报 0.45~0.55 带内占比）/ 幅度比 / 静态偏差，`SB-signed` 行给有符号均值（区分系统性偏向与镜像对）。门槛附近用 64 个 episode 复核（32 个有 ±0.03 的幅度比噪声）。
-- `posture_batch_eval.py <task> <ckpt.pt> [envs=64] [cmds=0.3,0.6,1.0,1.3] [steps=600] [tag]` — 批量姿态评估（PyTorch 策略，逐 episode 统计再平均）：两轮前后摆动 std（前后摆腿幅度）、重心左右转移 std、base 相对两轮中点的偏移、躯干俯仰、前进速度、摔倒数。
+- `posture_batch_eval.py <task> <ckpt.pt> [envs=64] [cmds=0.3,0.6,1.0,1.3] [steps=600] [tag]` — 批量姿态评估（PyTorch 策略，逐 episode 统计再平均）：两轮前后摆动 std（前后摆腿幅度）、重心左右转移 std、base 相对两轮中点的偏移、躯干俯仰、前进速度、摔倒数，以及站立 / 行进时的转向角速度晃动 std（"原地乱扭"）和关节角速度 RMS。
+- `turn_eval.py <task> <ckpt.pt> [envs=32] [vx=0,0.6,1.0,1.3] [wz=-1.3,-0.6,0,0.6,1.3] [steps=600] [tag]` — 转弯评估（Turn 任务）：在"前进速度 × 转向速度"网格上看转向 / 前进速度跟踪、摔倒、**转弯时的摆腿与直行相比**（左右腿分别列出，左转 +wz 时右腿是外侧腿）、是否仍左右交替、左转与右转是否互为镜像（左右关节偏差正负相反）。原地（vx = 0）旋转允许腿不摆。
 - `stand_fall_time.py <task> <ckpt.pt> <tag>` — 指令 0（站立）下 256 个环境站 30 s：摔倒数、摔倒时间分布、摔倒者的初始速度。
 - `fall_diag.py <task> <ckpt.pt> <tag> [envs=256]` — 站立摔倒诊断：摔倒方向（前 / 后 / 侧）、倒下前 1 / 3 / 6 s 的躯干俯仰 / 横滚晃动、轮速抖动，以及没倒的环境的站姿（躯干后仰、髋 pitch / 小腿平均、左右髋 pitch / yaw 差）。
 - `speed_track.py <episodes> <steps> <cmds,逗号分隔> tag=onnx [tag=onnx ...]` — 同一个环境、同一套指令下比较多个检查点的前向速度跟踪（均值 / bias / RMSE，丢掉前 100 步起步段）。环境变量 `TASK` 指定任务。输入是 ONNX（训练时每次保存会在 run 目录导出 `<run>.onnx`，对应最近一次保存的 checkpoint，先 `cp` 出来）。
