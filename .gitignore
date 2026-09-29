@@ -24,3 +24,6 @@ logs/
 
 # MuJoCo warning log (written to the working directory whenever the sim emits a warning)
 MUJOCO_LOG.TXT
+
+# Foot-lift reference papers (arXiv 2606.31807, 2607.10815): kept locally, not redistributed
+docs/papers/
