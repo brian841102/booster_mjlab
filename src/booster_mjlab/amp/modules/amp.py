@@ -432,6 +432,7 @@ def construct_amp(
         dataset_weights=cfg.get("dataset_weights"),
         augmentations=cfg.get("dataset_augmentations"),
         dataset_transform=cfg.get("dataset_transform"),
+        extra_obs_fn=cfg.get("amp_extra_obs_fn"),
         default_pose=default_pose,
         joint_indices=joint_indices,
         include_base_lin_vel=include_base_lin_vel,

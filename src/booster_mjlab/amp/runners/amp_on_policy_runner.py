@@ -79,6 +79,10 @@ class AmpOnPolicyRunnerCfg(RslRlOnPolicyRunnerCfg):
     """Additional AMP motion augmentations applied per clip (for example: mirror, speed modifiers)."""
     dataset_transform: str | None = None
     """Optional ``module.path:function`` remapping each clip onto the robot's joint layout."""
+    amp_extra_obs_fn: str | None = None
+    """Optional ``module.path:function`` computing extra per-frame expert AMP features from a prepared clip
+    (``MotionData -> (T, E)``), appended after the standard blocks. The env's AMP observation group must end with the
+    matching policy-side term(s) of the same width."""
     obs_groups: dict[str, tuple[str, ...]] = field(
         default_factory=lambda: {
             "actor": ("actor",),

@@ -17,11 +17,12 @@ from .motion_augmentations import (
 SUPPORTED_MOTION_FILE_EXTENSIONS = (".pkl", ".csv")
 
 MotionTransform = Callable[[MotionFile], MotionFile]
+MotionFeatureFn = Callable[[MotionData], torch.Tensor]
 
 
 def resolve_motion_transform(
-    transform: MotionTransform | str | None,
-) -> MotionTransform | None:
+    transform: MotionTransform | MotionFeatureFn | str | None,
+) -> MotionTransform | MotionFeatureFn | None:
     """Resolve a ``module.path:function`` spec into the callable it names."""
     if transform is None or callable(transform):
         return transform
@@ -95,6 +96,11 @@ class MotionLoader:
     ``dataset_transform`` optionally remaps every clip onto another joint layout
     (a callable, or a ``module.path:function`` spec). It runs after augmentation,
     so augmentations still see the dataset's own layout.
+
+    ``extra_obs_fn`` optionally computes extra per-frame features from each
+    prepared (augmented, resampled) clip, ``MotionData -> (T, E)``, appended
+    after the standard blocks; the AMP observation group must end with the
+    matching policy-side term(s).
     """
 
     def __init__(
@@ -106,6 +112,7 @@ class MotionLoader:
         dataset_weights: List[float] | None = None,
         augmentations: Sequence[MotionAugmentationSpec] | None = None,
         dataset_transform: MotionTransform | str | None = None,
+        extra_obs_fn: MotionFeatureFn | str | None = None,
         default_pose: torch.Tensor | None = None,
         joint_indices: List[int] | None = None,
         include_base_lin_vel: bool = True,
@@ -127,6 +134,7 @@ class MotionLoader:
         self.num_amp_obs_steps = num_amp_obs_steps
         self.augmentations = build_motion_augmentations(augmentations)
         self.dataset_transform = resolve_motion_transform(dataset_transform)
+        self.extra_obs_fn = resolve_motion_transform(extra_obs_fn)
         self.default_pose = default_pose
         self.joint_indices = joint_indices
         self.include_base_lin_vel = include_base_lin_vel
@@ -202,6 +210,10 @@ class MotionLoader:
                     )
                     obs = obs.clone()
                     obs[:, :joint_dim] -= self.default_pose
+
+                if self.extra_obs_fn is not None:
+                    extra = self.extra_obs_fn(data).to(obs)
+                    obs = torch.cat([obs, extra[history_indices.reshape(-1)]], dim=-1)
 
                 # Each discriminator sample is one chronological, frame-major
                 # history: [obs(t-K+1), ..., obs(t)]. Early clip frames are
