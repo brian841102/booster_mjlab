@@ -8,7 +8,7 @@ dropped; statistics per episode, then averaged over the episodes that did not fa
   wheel split std   std of x_R - x_L (cm): fore-aft leg swing amplitude at the wheels
   CoM dy std        std of the whole-body CoM lateral offset (cm): side-to-side weight shift while skating
   base dx / dy      mean root offset from the wheel midpoint (cm)
-  torso pitch       mean pitch of link_torso from gravity (deg; + = leaning forward)
+  torso pitch       mean pitch of link_torso from gravity (deg; NEGATIVE = leaning forward, e.g. Fast06 -10.8)
   speed             mean forward speed in the heading frame (m/s)
   yaw rate          std of the base yaw rate (deg/s): twisting / wandering in place (most telling at cmd 0)
   joint vel         RMS joint velocity over all position joints (rad/s): how much the body keeps moving
@@ -47,7 +47,7 @@ def main():
     env = ManagerBasedRlEnv(cfg=env_cfg, device="cuda:0")
     venv = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
     runner = (load_runner_cls(task))(venv, asdict(agent_cfg), device="cuda:0")
-    runner.load(ckpt, load_cfg={"actor": True}, strict=True, map_location="cuda:0")
+    runner.load(ckpt, load_cfg={"actor": True, "discriminator": False}, strict=True, map_location="cuda:0")
     policy = runner.get_inference_policy(device="cuda:0")
     robot = env.scene["robot"]
     term = env.command_manager.get_term("twist")

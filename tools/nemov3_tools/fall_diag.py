@@ -15,7 +15,7 @@ tw.rel_standing_envs = 0.0; tw.rel_forward_envs = 0.0
 agent = load_rl_cfg(task)
 env = ManagerBasedRlEnv(cfg=cfg, device="cuda:0"); venv = RslRlVecEnvWrapper(env, clip_actions=agent.clip_actions)
 runner = load_runner_cls(task)(venv, asdict(agent), device="cuda:0")
-runner.load(ckpt, load_cfg={"actor": True}, strict=True, map_location="cuda:0")
+runner.load(ckpt, load_cfg={"actor": True, "discriminator": False}, strict=True, map_location="cuda:0")
 pol = runner.get_inference_policy(device="cuda:0")
 r = env.scene["robot"]; J = r.joint_names
 torso = r.body_names.index("link_torso")

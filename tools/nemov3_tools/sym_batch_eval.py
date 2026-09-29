@@ -88,7 +88,7 @@ def main():
     env = ManagerBasedRlEnv(cfg=env_cfg, device="cuda:0")
     venv = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
     runner = (load_runner_cls(task))(venv, asdict(agent_cfg), device="cuda:0")
-    runner.load(ckpt, load_cfg={"actor": True}, strict=True, map_location="cuda:0")
+    runner.load(ckpt, load_cfg={"actor": True, "discriminator": False}, strict=True, map_location="cuda:0")
     policy = runner.get_inference_policy(device="cuda:0")
     robot = env.scene["robot"]
     term = env.command_manager.get_term("twist")

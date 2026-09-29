@@ -12,6 +12,14 @@ nemov3 实验评估脚本（在仓库根目录运行，`.venv/bin/python3 tools/
 - `symmetry_check.py [n]` — 验证 `mdp/nemov3_symmetry.py` 的镜像规则：mirror(obs(s)) 是否等于 obs(镜像状态)（注意 `compute(update_history=True)`，不带参数会返回缓存）。**改了观测项（例如加入转弯）后必须重跑。**
 - `disc_by_speed.py <task> <ckpt.pt> [envs=32] [cmds] [steps=600]` — 判别器诊断：按指令速度给策略样本打分（D 均值 / p10 / p90、风格奖励）、左右镜像后的得分，以及判别器对各 AMP 关节的敏感度（它在用哪些特征拒绝策略）。
 
+## 抬脚滑冰（Exp 46+）
+- `lift_eval.py <task> <ckpt.pt> [envs=32] [vx=0.6,1.0,1.3] [wz=0] [steps=600] [tag]` — 抬脚统计：离地 > 2 / 5 cm 的时间、每只轮子每秒抬几次 / 峰高 / 每次多久、单轮支撑占比、左右交替、抬的是不是后脚、微弹跳，**步态周期**（右脚离地到下一次右脚离地；Fast06 1.33 s，用户接受 ±10%），以及单轮支撑时怎么平衡的 BAL 行。
+- `lift_pose.py <task> <ckpt.pt> [envs=32] [vx=1.0,1.3] [steps=600] [tag] [--rows]` / `lift_pose.py ref` — **用户认定的姿态标准（CRIT 行）**：以每次抬脚为时间轴，抬起的是后脚（在支撑脚后方的时间 ≥ 80%）、后腿往后伸（抬脚前 60% 平均在后方 ≥ 8 cm）、抬起那侧的手整段在前（≥ 90%，否则就是"同手同脚"）；`--rows` 打印抬脚 5 个阶段的位置 / 手 / 膝 / 髋。`ref` = Fast06 的数值。
+- `eval_tempo.sh <task> <run dir> <tag> <iteration...>` — 一个 checkpoint 的整套评估（等 checkpoint 存好才跑，可与训练同时进行）：`lift_eval`（含 TEMPO：周期是否在 Fast06 ±10%）、`lift_pose` CRIT、`posture_batch_eval`。
+- `record_video.py <task> <ckpt.pt> <out.mp4> [segments=0:3,0.3:4,0.6:5,0.8:5,1.0:6,1.3:6] [w=854] [h=480] [title]` — 离屏录影（`MUJOCO_GL=egl`），左前方跟拍、由慢到快，画面标注指令 / 实际速度与两轮离地高度。
+- `record_reference.py <out.mp4> [clip=.../skatingfast06.pkl] [start_s=2] [seconds=12] [w] [h] [title]` — 参考动捕片段按同样机位回放（无物理），用来和策略影片并排对照。
+- `train_curve.py <train.log> [window=100] [metric substrings]` — 从训练 log 按区间平均 task / style 奖励与各项指标（判断"奖励不再增长就停"）。
+
 ## archive/（早期调试 / 一次性排查，保留是因为实验记录里引用了它们）
 大多输入 ONNX、单环境（AMP 重置姿态池只有 ~5 个初始姿态，统计有偏，见实验记录「对称性评估方法的两次修正」），环境变量 `TASK` 指定任务。
 
