@@ -1,10 +1,18 @@
+from mjlab.managers.observation_manager import ObservationTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.tasks.registry import register_mjlab_task
 
 from booster_mjlab.tasks.velocity.config import with_amp_obs_group
+from booster_mjlab.tasks.velocity.mdp.wheel_feet import (
+    GATED_AMP_JOINTS,
+    base_forward_speed,
+    gated_base_pitch,
+    gated_joint_pos,
+    wheel_height_diff,
+)
 from booster_mjlab.tasks.velocity.rl.runner import VelocityAmpOnPolicyRunner
 
-from .env_cfgs import nemov3_flat_env_cfg
+from .env_cfgs import FOOT_LIFT_HIP_ROLL_LIMIT_RAD, UPRIGHT_STD_MOVING_RELAXED, nemov3_flat_env_cfg
 from .rl_cfg import (
     NEMOV3_AMP_DATASET_ROOT_SYMMETRIC,
     NEMOV3_MIRROR_LOSS_COEFF,
@@ -47,6 +55,49 @@ NEMOV3_AMP_TWIST_JOINT_NAMES = NEMOV3_AMP_ARM_JOINT_NAMES + (
     r".*_hip_yaw_joint",
 )
 
+# Foot-lift skating (Exp 50+): also score shoulder yaw + pelvis yaw -- the diagonal arm swing (the arm opposite the
+# leading foot swings forward and across, mostly shoulder yaw) and the upper-body twist of Fast06. Needs env
+# arm_yaw=True (frees shoulder yaw from the posture penalty).
+NEMOV3_AMP_SKATE_JOINT_NAMES = NEMOV3_AMP_ARM_JOINT_NAMES + (
+    r"joint_[rl]ShoulderYaw",
+    r"joint_pelvisYaw",
+)
+
+# Foot-lift skating: the discriminator also sees the right-minus-left wheel height (joint angles alone cannot tell a
+# lifted wheel from a crouch) and the base forward speed (the style is judged per speed, so above ~0.8 m/s only the
+# lifting Fast06 counts as real); the expert side is appended by the motion loader (amp_extra_obs_fn). Exp 49 used the
+# reference lifts as they are (Fast06 peaks at 8.5 cm), Exp 50+ scaled to ~6 cm (user: "离地六公分感觉就差不多了").
+NEMOV3_LIFT_SPEED_EXPERT_FN = "booster_mjlab.tasks.velocity.mdp.wheel_feet:lift_features_from_motion"
+NEMOV3_LIFT_6CM_SPEED_EXPERT_FN = "booster_mjlab.tasks.velocity.mdp.wheel_feet:lift_features_6cm_from_motion"
+# Speed-gated feature set (Exp 57 / 59): the joints above scored at all speeds, hip roll / yaw, shoulder yaw, pelvis yaw
+# and the root pitch only at speed (mdp.wheel_feet.AMP_SPEED_GATE), with instance noise on the channels Skating01/02
+# did not capture (dataset transform).
+NEMOV3_GATED_LIFT_EXPERT_FN = "booster_mjlab.tasks.velocity.mdp.wheel_feet:gated_lift_features_from_motion"
+NEMOV3_NOISE_UNCAPTURED_TRANSFORM = "booster_mjlab.tasks.velocity.mdp.wheel_feet:noise_uncaptured_joints"
+
+
+def with_nemov3_lift_features(cfg, gated=False):
+    """Append [(gated joints,) wheel height difference, base forward speed(, gated root pitch)] as the last AMP terms, the
+    order of the expert-side function."""
+    terms = cfg.observations["amp"].terms
+    if gated:
+        terms["gated_joint_pos"] = ObservationTermCfg(
+            func=gated_joint_pos,
+            params={"asset_cfg": SceneEntityCfg("robot", joint_names=GATED_AMP_JOINTS, preserve_order=True)},
+        )
+    terms["wheel_height_diff"] = ObservationTermCfg(
+        func=wheel_height_diff,
+        params={
+            "asset_cfg": SceneEntityCfg(
+                "robot", body_names=("right_wheel_link", "left_wheel_link"), preserve_order=True
+            )
+        },
+    )
+    terms["base_forward_speed"] = ObservationTermCfg(func=base_forward_speed)
+    if gated:
+        terms["gated_base_pitch"] = ObservationTermCfg(func=gated_base_pitch)
+    return cfg
+
 # Whether the discriminator also sees the torso state (base linear velocity +
 # projected gravity). Off since Exp 13: the mocap reference has an extremely
 # tight torso orientation (projected gravity y std 0.006, ~0.3 deg) that the
@@ -88,7 +139,14 @@ def with_nemov3_amp_joints(cfg, joint_names=NEMOV3_AMP_JOINT_NAMES):
     return cfg
 
 
-def _with_amp_reset_cfg(env_cfg, runner_cfg, joint_names=NEMOV3_AMP_JOINT_NAMES):
+def _with_amp_reset_cfg(
+    env_cfg,
+    runner_cfg,
+    joint_names=NEMOV3_AMP_JOINT_NAMES,
+    lift_features=None,
+    gated=False,
+    style_weight=NEMOV3_STYLE_REWARD_WEIGHT,
+):
     cfg = with_amp_obs_group(
         env_cfg,
         dataset_root=runner_cfg.dataset_root,
@@ -100,22 +158,35 @@ def _with_amp_reset_cfg(env_cfg, runner_cfg, joint_names=NEMOV3_AMP_JOINT_NAMES)
     # The shared wrapper pins this curriculum to 0.3 -> 0.3; the runner reads
     # the weight from here, not from the runner cfg's style_reward_weight.
     style_params = cfg.curriculum["amp_style_weight"].params
-    style_params["start_weight"] = NEMOV3_STYLE_REWARD_WEIGHT
-    style_params["end_weight"] = NEMOV3_STYLE_REWARD_WEIGHT
-    return with_nemov3_amp_joints(cfg, joint_names)
+    style_params["start_weight"] = style_weight
+    style_params["end_weight"] = style_weight
+    cfg = with_nemov3_amp_joints(cfg, joint_names)
+    return with_nemov3_lift_features(cfg, gated) if lift_features else cfg
 
 
-def _register(name, env_kwargs=None, rl_kwargs=None, amp_joints=NEMOV3_AMP_JOINT_NAMES):
-    """Register ``Mjlab-Velocity-Flat-Amp{name}[-Muon]-Booster-Nemov3``."""
+def _register(
+    name,
+    env_kwargs=None,
+    rl_kwargs=None,
+    amp_joints=NEMOV3_AMP_JOINT_NAMES,
+    lift_features=None,
+    gated=False,
+    style_weight=NEMOV3_STYLE_REWARD_WEIGHT,
+):
+    """Register ``Mjlab-Velocity-Flat-Amp{name}[-Muon]-Booster-Nemov3``.
+
+    ``lift_features`` = the expert-side function of the discriminator's foot-lift features (NEMOV3_*_EXPERT_FN), with
+    ``gated`` the speed-gated set.
+    """
     env_kwargs = env_kwargs or {}
+    rl_kwargs = {**(rl_kwargs or {}), **({"amp_extra_obs_fn": lift_features} if lift_features else {})}
+    amp_args = (amp_joints, lift_features, gated, style_weight)
     for use_muon in (False, True):
-        rl_cfg = nemov3_amp_ppo_runner_cfg(use_muon=use_muon, **(rl_kwargs or {}))
+        rl_cfg = nemov3_amp_ppo_runner_cfg(use_muon=use_muon, **rl_kwargs)
         register_mjlab_task(
             task_id=f"Mjlab-Velocity-Flat-Amp{name}{'-Muon' if use_muon else ''}-Booster-Nemov3",
-            env_cfg=_with_amp_reset_cfg(nemov3_flat_env_cfg(**env_kwargs), rl_cfg, amp_joints),
-            play_env_cfg=_with_amp_reset_cfg(
-                nemov3_flat_env_cfg(play=True, **env_kwargs), rl_cfg, amp_joints
-            ),
+            env_cfg=_with_amp_reset_cfg(nemov3_flat_env_cfg(**env_kwargs), rl_cfg, *amp_args),
+            play_env_cfg=_with_amp_reset_cfg(nemov3_flat_env_cfg(play=True, **env_kwargs), rl_cfg, *amp_args),
             rl_cfg=rl_cfg,
             runner_cls=VelocityAmpOnPolicyRunner,
         )
@@ -156,6 +227,90 @@ _register(
     {"mirror": True, "mirror_loss_coeff": NEMOV3_MIRROR_LOSS_COEFF},
     NEMOV3_AMP_ARM_JOINT_NAMES,
 )
+# Foot-lift skating (docs/nemov3_foot_lift_plan.md; tools/nemov3_finetune.md, section 抬脚). Only the runs the log keeps
+# as milestones are registered here; the other experiments are described in the log.
+# Exp 46: single-wheel feasibility probe -- ride on the right wheel with the left one held up, no style reward, hip-roll
+# limit relaxed to 0.2 rad, 0-1.2 m/s. Deliberately one-sided, so no mirror loss.
+_register(
+    "-Clock-Arms-SingleWheel",
+    {**_NARROW, "single_wheel": True, "hip_roll_limit": FOOT_LIFT_HIP_ROLL_LIMIT_RAD},
+    amp_joints=NEMOV3_AMP_ARM_JOINT_NAMES,
+    style_weight=0.0,
+)
+# The lift runs share the Exp 33 base (straight, all clips + mirror, mirror loss), the hip-roll limit 0.2 rad (user),
+# [B]-style contact-timing rewards above 0.6 m/s and a discriminator that also sees the wheel height difference and the
+# forward speed; Fast06 weighted 2x in the expert samples / reset poses.
+_LIFT = {**_NARROW, "symmetric_default": True, "hip_roll_limit": FOOT_LIFT_HIP_ROLL_LIMIT_RAD}
+_LIFT_RL = {"mirror": True, "mirror_loss_coeff": NEMOV3_MIRROR_LOSS_COEFF, "dataset_weights": [1.0, 1.0, 2.0]}
+_NATURAL = {**_LIFT, "lean": True, "arm_yaw": True}
+_GATED_RL = {**_LIFT_RL, "dataset_transform": NEMOV3_NOISE_UNCAPTURED_TRANSFORM}
+# Exp 49: lift pay strong from the start (lift="early") -- the first lifts: alternating rear-wheel lifts, but too fast
+# and high (stamping in place).
+_register(
+    "-Clock-Arms-NarrowStance-Mirror-SymLoss-Lift-SpeedDisc-Early",
+    {**_LIFT, "lift": "early"},
+    _LIFT_RL,
+    NEMOV3_AMP_ARM_JOINT_NAMES,
+    NEMOV3_LIFT_SPEED_EXPERT_FN,
+)
+# Exp 50 / 51 (after the user watched Exp 49): the natural targets at once (lift="natural": slower rhythm, ~6 cm
+# reference lifts + a bound above 8 cm), forward lean, diagonal arm swing / upper-body twist (shoulder + pelvis yaw in
+# the discriminator, shoulder yaw free) -- no lift from scratch (50), lifts dropped when resumed from Exp 49 (51).
+_register(
+    "-Clock-Arms-NarrowStance-Mirror-SymLoss-Lift-Natural",
+    {**_NATURAL, "lift": "natural"},
+    _LIFT_RL,
+    NEMOV3_AMP_SKATE_JOINT_NAMES,
+    NEMOV3_LIFT_6CM_SPEED_EXPERT_FN,
+)
+# Exp 52 (rerun as Exp 76): learn first, then shape (lift="staged": Exp 49's recipe for 400 iterations, then a move to
+# the Exp 50 targets over 400-1200). The fast posture the user approved -- the rear wheel lifted and stretched back, the
+# lifted-side hand ahead -- at ~1.0 s per stride cycle; but no slow alternating stride.
+_register(
+    "-Clock-Arms-NarrowStance-Mirror-SymLoss-Lift-Staged",
+    {**_NATURAL, "lift": "staged"},
+    _LIFT_RL,
+    NEMOV3_AMP_SKATE_JOINT_NAMES,
+    NEMOV3_LIFT_6CM_SPEED_EXPERT_FN,
+)
+# Exp 57: speed-gated discriminator (Exp 52's recipe without the lean reward) -- the slow alternating stride came back
+# with the lifts, but the lifted foot swings forward (the front one is lifted) and the lean was lost (~2 deg).
+_register(
+    "-Clock-Arms-NarrowStance-Mirror-SymLoss-Lift-Staged-Gated",
+    {**_LIFT, "lift": "staged", "arm_yaw": True},
+    _GATED_RL,
+    NEMOV3_AMP_ARM_JOINT_NAMES,
+    NEMOV3_GATED_LIFT_EXPERT_FN,
+    gated=True,
+)
+# Exp 59a / 59b: Exp 57 @1800 resumed with the staged end values and the upright tilt tolerance relaxed while moving;
+# "-Lean" (59b) adds the forward-lean reward back (user: allowed if needed to look good): lean 8-9 deg.
+for _suffix, _lean in (("", False), ("-Lean", True)):
+    _register(
+        f"-Clock-Arms-NarrowStance-Mirror-SymLoss-Lift-StagedEnd-Gated-Upright1{_suffix}",
+        {
+            **_LIFT,
+            "lift": "staged_end",
+            "arm_yaw": True,
+            "lean": _lean,
+            "upright_std_moving": UPRIGHT_STD_MOVING_RELAXED,
+        },
+        _GATED_RL,
+        NEMOV3_AMP_ARM_JOINT_NAMES,
+        NEMOV3_GATED_LIFT_EXPERT_FN,
+        gated=True,
+    )
+# Exp 77a / 77a2 (user: "符合Fast06的节奏"): Exp 52 + lifts timed by the gait clock. 77a (lift_clock=True) dropped its
+# lifts while the window was ramped in; 77a2 (lift_clock="compensated") -- Fast06's tempo (1.34 s per stride cycle) and
+# the first natural foot-lift gait (user, 2026-09-29: "77a2 很好 姿态有自然").
+for _suffix, _clock in (("-ClockWindow", True), ("-ClockWindow2", "compensated")):
+    _register(
+        "-Clock-Arms-NarrowStance-Mirror-SymLoss-Lift-Staged" + _suffix,
+        {**_NATURAL, "lift": "staged", "lift_clock": _clock},
+        _LIFT_RL,
+        NEMOV3_AMP_SKATE_JOINT_NAMES,
+        NEMOV3_LIFT_6CM_SPEED_EXPERT_FN,
+    )
 # + reference clips made left/right symmetric one by one (Exp 36+).
 _register(
     "-Clock-Arms-NarrowStance-SymClips-SymLoss",

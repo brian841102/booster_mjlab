@@ -30,6 +30,7 @@ import dataclasses
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg, JointVelocityActionCfg
+from mjlab.managers.curriculum_manager import CurriculumTermCfg
 from mjlab.managers.observation_manager import ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
@@ -46,11 +47,19 @@ from booster_mjlab.robots.nemov3.nemov3_constants import (
     NEMOV3_POSITION_JOINT_NAMES,
     NEMOV3_WHEEL_JOINT_NAMES,
 )
+from booster_mjlab.tasks.velocity.mdp.rewards import torso_forward_lean
 from booster_mjlab.tasks.velocity.mdp.stance import hip_roll_excess
 from booster_mjlab.tasks.velocity.mdp.wheel_feet import (
+    reward_param_schedule,
+    reward_weight_schedule,
+    single_wheel_lift,
     wheel_air_time,
     wheel_clearance,
+    wheel_height_excess,
+    wheel_jump,
     wheel_lift,
+    wheel_single_stance,
+    wheel_support_switch,
     wheel_swing_height,
 )
 from booster_mjlab.tasks.velocity.mdp.gait_clock import GaitClockCommandCfg
@@ -122,6 +131,103 @@ FOOT_LIFT_SHAPED_WEIGHTS = {"lift": 2.0, "swing_height": -1.0}
 HIP_ROLL_LIMIT_RAD = 0.14
 HIP_ROLL_SPREAD_WEIGHT = -100.0
 
+# Foot-lift skating (lift=..., docs/nemov3_foot_lift_plan.md; tools/nemov3_finetune.md Exp 46-77, section 抬脚).
+# Hip-roll upper limit (user, 2026-09-25): relaxed from 0.14 to 0.2 rad, still short of Fast06's ~0.26 (reached by
+# the lifted leg only; the support leg stays <= 0.11), to keep the sideways swing small.
+FOOT_LIFT_HIP_ROLL_LIMIT_RAD = 0.2
+
+# Single-wheel feasibility probe (single_wheel=True, Exp 46): can the robot ride on the right wheel with the left one
+# held >= SINGLE_WHEEL_TARGET_M up, and at which speeds? Trained without style reward; forward speed 0 -
+# SINGLE_WHEEL_MAX_SPEED m/s, no turning.
+SINGLE_WHEEL_LIFT_WEIGHT = 3.0
+SINGLE_WHEEL_TARGET_M = 0.05
+SINGLE_WHEEL_MAX_SPEED = 1.2
+
+# Contact-timing rewards after 2607.10815's Push Glide ([B]; user: "接触时序奖励可以学B"): hop penalty, single-stance
+# pay, support-switch pay. One policy for all speeds, the rewards only above LIFT_RAMP_SPEED[0] m/s (user: "你可以让奖励在
+# 0.6米每秒速度以上才引入"), faded in up to LIFT_RAMP_SPEED[1] to avoid a style switch at one speed. Fast06 (steady part):
+# peak 8.3-8.5 cm, 0.37-0.42 s with the other wheel > 3 cm higher, strictly alternating.
+LIFT_RAMP_SPEED = (0.6, 1.0)
+LIFT_TARGET_HEIGHT_M = 0.05  # single-stance pay saturates here; the discriminator's height feature shapes the rest
+LIFT_MAX_SINGLE_STANCE_S = 0.6
+LIFT_SWITCH_MIN_HEIGHT_M = 0.03
+STEPS_PER_ITERATION = 24
+# Per recipe (env lift=...): (start weight, end weight, first iteration, last iteration) of each term's linear weight
+# schedule, and the air-time range of a lift the support switch pays.
+#   "early" (Exp 49): with driven wheels a lift has no task benefit, so it must be found while the policy still explores
+#     -- [B]'s weak start (Exp 47 / 48) never lifted; strong single-stance pay from the start, +5 per switch.
+#   "natural" (Exp 50 from scratch, Exp 51 resumed from Exp 49; after the user watched Exp 49: "抬脚节奏太快了 ... 原地来回
+#     跺脚的感觉很不自然 ... 离地六公分感觉就差不多了"): switch +1 only after >= 0.35 s, lift pay handed over to the style
+#     sooner, a penalty above 8 cm -- neither found a lift / kept one (Exp 51 dropped its lifts within 100 iterations).
+#   "staged" (Exp 52+): learn first, then shape -- iterations 0-400 the Exp 49 recipe, 400-1200 a linear move to the
+#     natural targets: switch 5 -> 1 and its minimum air time 0.15 -> 0.35 s (LIFT_SWITCH_MIN_AIR_TIME_STAGED), forward
+#     lean 0 -> 1.0, the > 8 cm bound 0 -> -1.0.
+#   "staged_end" (Exp 59, resumed runs): the staged end values held constant (a resumed env restarts its step counter,
+#     which would replay the schedules from their start).
+LIFT_WEIGHT_SCHEDULES = {
+    "early": {
+        "wheel_single_stance": (3.0, 1.5, 0, 1500),
+        "wheel_support_switch": (5.0, 5.0, 0, 1),
+        "wheel_jump": (-2.5, -1.8, 0, 900),
+    },
+    "natural": {
+        "wheel_single_stance": (3.0, 0.8, 0, 1000),
+        "wheel_support_switch": (1.0, 1.0, 0, 1),
+        "wheel_jump": (-2.5, -1.8, 0, 900),
+    },
+    "staged": {
+        "wheel_single_stance": (3.0, 1.5, 0, 1200),
+        "wheel_support_switch": (5.0, 1.0, 400, 1200),
+        "wheel_jump": (-2.5, -1.8, 0, 900),
+        "wheel_height_excess": (0.0, -1.0, 400, 1000),  # end = LIFT_HEIGHT_EXCESS_WEIGHT
+        "torso_forward_lean": (0.0, 1.0, 400, 1000),
+    },
+}
+LIFT_WEIGHT_SCHEDULES["staged_end"] = {
+    name: (end, end, 0, 1) for name, (_, end, _, _) in LIFT_WEIGHT_SCHEDULES["staged"].items()
+}
+LIFT_SWITCH_AIR_TIME_S = {"early": (0.15, 0.9), "natural": (0.35, 1.0), "staged": (0.15, 1.0), "staged_end": (0.35, 1.0)}
+LIFT_SWITCH_MIN_AIR_TIME_STAGED = (0.15, 0.35, 400, 1200)
+LIFT_HEIGHT_LIMIT_M = 0.08
+LIFT_HEIGHT_EXCESS_WEIGHT = -1.0
+
+# Forward lean (lean=True; user: "正常滑冰应该是身体略微倾斜"): Fast06 leans the torso forward 10.8 deg (std 1.4) at
+# ~0.9 m/s; Skating01/02 carry no torso orientation (constant 0 in the data), so the discriminator cannot teach it (and
+# must not see it). Target = LEAN_TARGET_RAD * min(|cmd| / LEAN_FULL_SPEED, 1): 0 when standing (stand straight).
+LEAN_TARGET_RAD = 0.175
+LEAN_FULL_SPEED = 1.0
+LEAN_STD_RAD = 0.1
+LEAN_WEIGHT = 1.0
+
+# Relaxed upright tolerance while moving (upright_std_moving, Exp 59; user: "会不会有可能是水平惩罚太重导致学不出判别器步态"):
+# the upright reward exp(-|g_xy|^2 / std^2) with the moving std 0.5 costs 14 % at Fast06's 11 deg lean (weight 1.0,
+# x0.3 task share ~0.04 / step), about what the discriminator gains from the lean -- so the lean may be cancelled.
+# With 1.0 an 11 deg lean costs ~4 %; standing keeps its std (stand straight).
+UPRIGHT_STD_MOVING_RELAXED = 1.0
+
+# Diagonal arm swing (arm_yaw=True; user: "手臂摆动自然带动上身 ... 左脚在前的时候对应胳膊往左前方摆动"): in Fast06 the arm
+# opposite the leading foot swings forward and across mostly through shoulder yaw (std 0.21 rad), with pelvis yaw
+# +-0.13 rad. Shoulder yaw leaves the upper_body_posture penalty and both get a larger action scale; the discriminator
+# scores them (config/nemov3/__init__.py, NEMOV3_AMP_SKATE_JOINT_NAMES).
+ARM_YAW_ACTION_SCALE = {
+    "joint_lShoulderYaw": 0.25,
+    "joint_rShoulderYaw": 0.25,
+    "joint_pelvisYaw": 0.2,
+}
+
+# Lift tempo on the gait clock (lift_clock, Exp 77a / 77a2; user: "符合Fast06的节奏 ... 10%误差内可接受"): Fast06's stride
+# cycle is 1.33 s -- two ~0.4 s lifts with ~0.27 s on both wheels in between (59 % single support) -- while the lifts
+# alone ran at a 1.03 s cycle (Exp 76). The observed gait clock (GAIT_FREQUENCY_HZ 0.74 = 1.35 s) gives each wheel a lift
+# window: the right wheel's single-stance pay only in the first LIFT_CLOCK_WINDOW of the cycle (0.41 s), the left
+# wheel's half a cycle later, both wheels down in between; ramped in over 400-1200 (LIFT_CLOCK_ALPHA). lift_clock=True
+# (Exp 77a) dropped every lift while the window was ramped in -- a lift at a random clock phase keeps only ~30 % of its
+# pay; lift_clock="compensated" (Exp 77a2) pays in-window lifts x 1 / LIFT_CLOCK_WINDOW, so such a lift keeps its
+# expected pay and lifts timed to the clock earn up to 3.3x more. Weighting the pay by the air time instead
+# (Exp 61-66 / 75 / 77b) slowed the tempo by lengthening each lift and swung the arms on the same side.
+LIFT_CLOCK_WINDOW = 0.30
+LIFT_CLOCK_ALPHA = (0.0, 1.0, 400, 1200)
+LIFT_CLOCK_GAIN_COMPENSATED = 1.0 / LIFT_CLOCK_WINDOW
+
 # Turning variant (turn=True): the yaw-rate command is sampled from [-TURN_YAW_RATE_MAX, TURN_YAW_RATE_MAX]
 # rad/s, i.e. left and right turns (user request: turning at 0~1.3 rad/s; Exp 41+). The straight-line tasks keep
 # the yaw-rate command at 0.
@@ -168,14 +274,32 @@ def nemov3_flat_env_cfg(
     narrow_stance: bool = False,
     symmetric_default: bool = False,
     turn: bool = False,
+    hip_roll_limit: float = HIP_ROLL_LIMIT_RAD,
+    single_wheel: bool = False,
+    lift: str | None = None,
+    lean: bool = False,
+    arm_yaw: bool = False,
+    upright_std_moving: float | None = None,
+    lift_clock: bool | str = False,
 ) -> ManagerBasedRlEnvCfg:
     """Create Nemov3 flat-terrain velocity tracking configuration.
 
     With ``turn=True`` the yaw-rate command is sampled from [-TURN_YAW_RATE_MAX, TURN_YAW_RATE_MAX] rad/s (left
     and right turns) instead of being pinned to 0.
 
-    With ``narrow_stance=True`` adds a hip-roll upper-limit penalty so the feet do not spread
-    (see the note at ``HIP_ROLL_LIMIT_RAD``: may need to be removed for foot-lift training).
+    With ``narrow_stance=True`` adds a hip-roll upper-limit penalty so the feet do not spread, above
+    ``hip_roll_limit`` (see the note at ``HIP_ROLL_LIMIT_RAD``; foot-lift training uses FOOT_LIFT_HIP_ROLL_LIMIT_RAD).
+
+    With ``single_wheel=True`` adds the single-wheel feasibility reward (ride on the right wheel with the left one
+    held up) and limits the forward command to SINGLE_WHEEL_MAX_SPEED.
+
+    With ``lift`` ("early" / "natural" / "staged" / "staged_end", see LIFT_WEIGHT_SCHEDULES) adds the [B]-style
+    contact-timing rewards (hop penalty, single stance, support switch), active only above LIFT_RAMP_SPEED[0], and
+    except for "early" a lift-height bound. ``lift_clock`` (True or "compensated"; needs ``clock``) times the lifts by
+    the gait clock (LIFT_CLOCK_*). With ``lean=True`` adds a speed-dependent forward-lean target for the torso (LEAN_*;
+    its weight follows the staged schedules). With ``arm_yaw=True`` (needs ``arms``) frees shoulder yaw from the
+    upper-body posture penalty and enlarges the shoulder / pelvis yaw action scale. ``upright_std_moving`` overrides
+    the tilt tolerance of the ``upright`` reward while moving (standing keeps its own), see UPRIGHT_STD_MOVING_RELAXED.
 
     With ``foot_lift=True`` (or ``"k1"``) adds K1-style air-time / clearance /
     swing-height rewards for the wheels, targeting the foot lift measured in
@@ -376,6 +500,28 @@ def nemov3_flat_env_cfg(
             r"joint_[rl]ShoulderRoll": 0.2,
             r"joint_[rl]ShoulderYaw": 0.2,
         }
+        if arm_yaw:
+            cfg.actions["joint_pos"].scale = {**cfg.actions["joint_pos"].scale, **ARM_YAW_ACTION_SCALE}
+            posture["asset_cfg"].joint_names = (r"head_.*_joint", r"joint_[rl]ShoulderRoll")
+            for key in ("std_standing", "std_walking", "std_running"):
+                posture[key] = {k: v for k, v in posture[key].items() if "ShoulderYaw" not in k}
+
+    if upright_std_moving is not None:
+        cfg.rewards["upright"].params["std_walking"] = upright_std_moving
+        cfg.rewards["upright"].params["std_running"] = upright_std_moving
+
+    if lean:
+        cfg.rewards["torso_forward_lean"] = RewardTermCfg(
+            func=torso_forward_lean,
+            weight=LEAN_WEIGHT,
+            params={
+                "command_name": "twist",
+                "target_rad": LEAN_TARGET_RAD,
+                "full_speed": LEAN_FULL_SPEED,
+                "std": LEAN_STD_RAD,
+                "asset_cfg": SceneEntityCfg("robot", body_names=(TRUNK_BODY,)),
+            },
+        )
 
     if symmetric_default:
         robot_cfg = cfg.scene.entities["robot"]
@@ -390,7 +536,100 @@ def nemov3_flat_env_cfg(
             weight=HIP_ROLL_SPREAD_WEIGHT,
             params={
                 "asset_cfg": SceneEntityCfg("robot", joint_names=(r".*_hip_roll_joint",)),
-                "limit": HIP_ROLL_LIMIT_RAD,
+                "limit": hip_roll_limit,
+            },
+        )
+
+    if lift:
+        wheels = SceneEntityCfg("robot", body_names=WHEEL_LINK_NAMES)
+        schedules = LIFT_WEIGHT_SCHEDULES[lift]
+        switch_air = LIFT_SWITCH_AIR_TIME_S[lift]
+        staged = lift in ("staged", "staged_end")
+        common = {
+            "sensor_name": "feet_ground_contact",
+            "command_name": "twist",
+            "ramp_lo": LIFT_RAMP_SPEED[0],
+            "ramp_hi": LIFT_RAMP_SPEED[1],
+        }
+
+        def schedule(name, w0, w1, it0, it1):
+            cfg.curriculum[f"{name}_weight"] = CurriculumTermCfg(
+                func=reward_weight_schedule,
+                params={
+                    "term_name": name,
+                    "start_weight": w0,
+                    "end_weight": w1,
+                    "start_step": it0 * STEPS_PER_ITERATION,
+                    "end_step": it1 * STEPS_PER_ITERATION,
+                },
+            )
+
+        def param_schedule(term, param, v0, v1, it0, it1):
+            cfg.curriculum[f"{term}_{param}"] = CurriculumTermCfg(
+                func=reward_param_schedule,
+                params={
+                    "term_name": term,
+                    "param": param,
+                    "start_value": v0,
+                    "end_value": v1,
+                    "start_step": it0 * STEPS_PER_ITERATION,
+                    "end_step": it1 * STEPS_PER_ITERATION,
+                },
+            )
+
+        lift_terms = {
+            "wheel_jump": (wheel_jump, {}),
+            "wheel_single_stance": (
+                wheel_single_stance,
+                {"asset_cfg": wheels, "target_height": LIFT_TARGET_HEIGHT_M, "max_time": LIFT_MAX_SINGLE_STANCE_S},
+            ),
+            "wheel_support_switch": (
+                wheel_support_switch,
+                {
+                    "asset_cfg": wheels,
+                    "min_height": LIFT_SWITCH_MIN_HEIGHT_M,
+                    "t_min": switch_air[0],
+                    "t_max": switch_air[1],
+                },
+            ),
+        }
+        for name, (func, params) in lift_terms.items():
+            w0, w1, it0, it1 = schedules[name]
+            cfg.rewards[name] = RewardTermCfg(func=func, weight=w0, params={**common, **params})
+            schedule(name, w0, w1, it0, it1)
+        if lift_clock:
+            assert clock, "lift_clock needs the gait clock (clock=True)"
+            stance = cfg.rewards["wheel_single_stance"].params
+            stance["clock_window"] = LIFT_CLOCK_WINDOW
+            stance["clock_alpha"] = LIFT_CLOCK_ALPHA[0]
+            if lift_clock == "compensated":
+                stance["clock_gain"] = LIFT_CLOCK_GAIN_COMPENSATED
+            param_schedule("wheel_single_stance", "clock_alpha", *LIFT_CLOCK_ALPHA)
+        if lift != "early":
+            cfg.rewards["wheel_height_excess"] = RewardTermCfg(
+                func=wheel_height_excess,
+                weight=LIFT_HEIGHT_EXCESS_WEIGHT,
+                params={"asset_cfg": wheels, "limit": LIFT_HEIGHT_LIMIT_M, "scale": 0.02},
+            )
+        if staged:
+            # Terms outside the lift set (height bound, forward lean) get their weight schedules here as well.
+            for name in ("wheel_height_excess", "torso_forward_lean"):
+                if name in cfg.rewards:
+                    w0, w1, it0, it1 = schedules[name]
+                    cfg.rewards[name].weight = w0
+                    schedule(name, w0, w1, it0, it1)
+            t_min = LIFT_SWITCH_MIN_AIR_TIME_STAGED if lift == "staged" else (switch_air[0], switch_air[0], 0, 1)
+            param_schedule("wheel_support_switch", "t_min", *t_min)
+
+    if single_wheel:
+        twist_cmd.ranges.lin_vel_x = (0.0, SINGLE_WHEEL_MAX_SPEED)
+        cfg.rewards["single_wheel_lift"] = RewardTermCfg(
+            func=single_wheel_lift,
+            weight=SINGLE_WHEEL_LIFT_WEIGHT,
+            params={
+                "target_height": SINGLE_WHEEL_TARGET_M,
+                "lifted_cfg": SceneEntityCfg("robot", body_names=("left_wheel_link",)),
+                "support_cfg": SceneEntityCfg("robot", body_names=("right_wheel_link",)),
             },
         )
 

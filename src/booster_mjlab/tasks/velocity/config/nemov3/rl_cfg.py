@@ -67,10 +67,23 @@ def nemov3_amp_ppo_runner_cfg(
     mirror: bool = False,
     symmetry: bool = False,
     mirror_loss_coeff: float = 0.0,
+    amp_extra_obs_fn: str | None = None,
+    dataset_weights: list[float] | None = None,
+    dataset_transform: str | None = None,
 ) -> AmpOnPolicyRunnerCfg:
-    """Create AMP runner configuration for the Nemov3 velocity task."""
+    """Create AMP runner configuration for the Nemov3 velocity task.
+
+    ``amp_extra_obs_fn`` computes extra per-frame expert features for the discriminator (``MotionData -> (T, E)``,
+    matching the last terms of the "amp" observation group). ``dataset_weights`` follow the sorted clip files
+    (skating01, skating02, skatingfast06); each clip's weight is its share of the expert samples and of the reset
+    poses, independent of the clip length. ``dataset_transform`` is applied to every loaded clip (e.g. instance noise on
+    channels a clip did not capture).
+    """
     algorithm_cls = AmpRslRlMuonPpoAlgorithmCfg if use_muon else AmpRslRlPpoAlgorithmCfg
     cfg = _nemov3_amp_ppo_runner_cfg(algorithm_cls, dataset_root, mirror, use_muon)
+    cfg.amp_extra_obs_fn = amp_extra_obs_fn
+    cfg.dataset_weights = dataset_weights
+    cfg.dataset_transform = dataset_transform
     if symmetry or mirror_loss_coeff > 0.0:
         # Left/right symmetry through the PPO symmetry extension (same mechanism as K1's "Flat-Amp-DA" task,
         # with a Nemov3-specific mirror function; the clock mirrors to phase + pi). Needs a mirror-symmetric

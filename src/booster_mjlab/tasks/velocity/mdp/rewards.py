@@ -185,3 +185,27 @@ class upper_body_posture_penalty:
         desired = self.default_joint_pos[:, asset_cfg.joint_ids]
         error_squared = torch.square(current - desired)
         return torch.mean(error_squared / (std**2), dim=1)
+
+
+def torso_forward_lean(
+    env: "ManagerBasedRlEnv",
+    command_name: str,
+    target_rad: float,
+    full_speed: float,
+    std: float,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """``exp(-((lean - target) / std)^2)`` with a forward-lean target that grows with the commanded speed.
+
+    lean = forward pitch of the body in ``asset_cfg`` from gravity (+ = leaning forward); target =
+    ``target_rad * min(|cmd_xy| / full_speed, 1)``, so a standing robot is asked to stand straight.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    assert command is not None, f"Command '{command_name}' not found."
+    quat = asset.data.body_link_quat_w[:, asset_cfg.body_ids[0]]
+    gravity = torch.tensor([0.0, 0.0, -1.0], device=env.device).expand(quat.shape[0], 3)
+    g = quat_apply_inverse(quat, gravity)
+    lean = torch.atan2(g[:, 0], -g[:, 2])
+    target = target_rad * (torch.norm(command[:, :2], dim=1) / full_speed).clamp(max=1.0)
+    return torch.exp(-torch.square((lean - target) / std))
