@@ -3,7 +3,8 @@
 usage: record_video.py <task> <checkpoint.pt> <out.mp4> [segments=0:3,0.3:4,0.6:5,0.8:5,1.0:6,1.3:6] [width=854]
                        [height=480] [title]
 
-segments = comma-separated "forward speed m/s:seconds" (yaw rate 0). One robot, deterministic policy, pushes off,
+segments = comma-separated "forward speed m/s:seconds" (yaw rate 0) or "forward speed:yaw rate rad/s:seconds" (turning;
+the caption then shows commanded / actual yaw rate too). One robot, deterministic policy, pushes off,
 tracking camera from the robot's left front. Every frame gets a caption: commanded / actual speed and each wheel's bottom
 height above the ground (so lifts are visible even in a small video). 25 fps real time (every 2nd 50 Hz step).
 """
@@ -28,7 +29,9 @@ R_WHEEL = 0.075
 
 def main():
     task, ckpt, out = sys.argv[1], sys.argv[2], sys.argv[3]
-    segs = [tuple(float(v) for v in s.split(":")) for s in (sys.argv[4] if len(sys.argv) > 4 else "0:3,0.3:4,0.6:5,0.8:5,1.0:6,1.3:6").split(",")]
+    segs = [[float(v) for v in s.split(":")] for s in (sys.argv[4] if len(sys.argv) > 4 else "0:3,0.3:4,0.6:5,0.8:5,1.0:6,1.3:6").split(",")]
+    segs = [(s[0], 0.0, s[1]) if len(s) == 2 else tuple(s) for s in segs]
+    turning = any(wz for _, wz, _ in segs)
     width = int(sys.argv[5]) if len(sys.argv) > 5 else 854
     height = int(sys.argv[6]) if len(sys.argv) > 6 else 480
     title = sys.argv[7] if len(sys.argv) > 7 else ""
@@ -67,8 +70,9 @@ def main():
 
     with torch.inference_mode():
         obs, _ = venv.reset()
-        for vx, seconds in segs:
+        for vx, wz, seconds in segs:
             tw.ranges.lin_vel_x = (vx, vx)
+            tw.ranges.ang_vel_z = (wz, wz)
             term._resample_command(all_ids)
             term.is_standing_env[:] = False
             for t in range(int(seconds / env.step_dt)):
@@ -90,10 +94,14 @@ def main():
                 y2 = 8 + font.size + 4
                 d.text((12, y2), f"右轮离地 {h[0]:4.1f} cm", font=small, fill=lift(h[0]))
                 d.text((12 + width // 4, y2), f"左轮离地 {h[1]:4.1f} cm", font=small, fill=lift(h[1]))
+                if turning:
+                    yaw = robot.data.root_link_ang_vel_w[0, 2].item()
+                    d.text((12 + width // 2, y2), f"转弯 指令 {wz:+.1f} 实际 {yaw:+.2f} rad/s", font=small,
+                           fill=(120, 220, 255) if wz else (200, 200, 200))
                 writer.send(np.asarray(img.convert("RGB")))
     writer.close()
     env.close()
-    print(f"VIDEO {out} {sum(s for _, s in segs):.0f} s {width}x{height}")
+    print(f"VIDEO {out} {sum(s for *_, s in segs):.0f} s {width}x{height}")
 
 
 if __name__ == "__main__":

@@ -9,14 +9,15 @@ nemov3 实验评估脚本（在仓库根目录运行，`.venv/bin/python3 tools/
 - `stand_fall_time.py <task> <ckpt.pt> <tag>` — 指令 0（站立）下 256 个环境站 30 s：摔倒数、摔倒时间分布、摔倒者的初始速度。
 - `fall_diag.py <task> <ckpt.pt> <tag> [envs=256]` — 站立摔倒诊断：摔倒方向（前 / 后 / 侧）、倒下前 1 / 3 / 6 s 的躯干俯仰 / 横滚晃动、轮速抖动，以及没倒的环境的站姿（躯干后仰、髋 pitch / 小腿平均、左右髋 pitch / yaw 差）。
 - `speed_track.py <episodes> <steps> <cmds,逗号分隔> tag=onnx [tag=onnx ...]` — 同一个环境、同一套指令下比较多个检查点的前向速度跟踪（均值 / bias / RMSE，丢掉前 100 步起步段）。环境变量 `TASK` 指定任务。输入是 ONNX（训练时每次保存会在 run 目录导出 `<run>.onnx`，对应最近一次保存的 checkpoint，先 `cp` 出来）。
-- `symmetry_check.py [n]` — 验证 `mdp/nemov3_symmetry.py` 的镜像规则：mirror(obs(s)) 是否等于 obs(镜像状态)（注意 `compute(update_history=True)`，不带参数会返回缓存）。**改了观测项（例如加入转弯）后必须重跑。**
+- `symmetry_check.py [n]` — 验证 `mdp/nemov3_symmetry.py` 的镜像规则：mirror(obs(s)) 是否等于 obs(镜像状态)（注意 `compute(update_history=True)`，不带参数会返回缓存）。**改了观测项（例如加入转弯）后必须重跑。** 用 `TASK=<task>` 指定任务；焊死关节（`fixed_joints`）的任务也适用。
 - `disc_by_speed.py <task> <ckpt.pt> [envs=32] [cmds] [steps=600]` — 判别器诊断：按指令速度给策略样本打分（D 均值 / p10 / p90、风格奖励）、左右镜像后的得分，以及判别器对各 AMP 关节的敏感度（它在用哪些特征拒绝策略）。
 
 ## 抬脚滑冰（Exp 46+）
 - `lift_eval.py <task> <ckpt.pt> [envs=32] [vx=0.6,1.0,1.3] [wz=0] [steps=600] [tag]` — 抬脚统计：离地 > 2 / 5 cm 的时间、每只轮子每秒抬几次 / 峰高 / 每次多久、单轮支撑占比、左右交替、抬的是不是后脚、微弹跳，**步态周期**（右脚离地到下一次右脚离地；Fast06 1.33 s，用户接受 ±10%），以及单轮支撑时怎么平衡的 BAL 行。
 - `lift_pose.py <task> <ckpt.pt> [envs=32] [vx=1.0,1.3] [steps=600] [tag] [--rows]` / `lift_pose.py ref` — **用户认定的姿态标准（CRIT 行）**：以每次抬脚为时间轴，抬起的是后脚（在支撑脚后方的时间 ≥ 80%）、后腿往后伸（抬脚前 60% 平均在后方 ≥ 8 cm）、抬起那侧的手整段在前（≥ 90%，否则就是"同手同脚"）；`--rows` 打印抬脚 5 个阶段的位置 / 手 / 膝 / 髋。`ref` = Fast06 的数值。
+- `eval_turn.sh <task> <run dir> <tag> <iteration...>` — 转弯 checkpoint 的整套评估（Exp 41 / 78 / 79 用的那一套；等 checkpoint 存好才跑）：`turn_eval` 转弯网格、`sym_batch_eval` 直行对称、`posture_batch_eval` 姿态 / 站立晃动、`stand_fall_time` 站立 30 s。
 - `eval_tempo.sh <task> <run dir> <tag> <iteration...>` — 一个 checkpoint 的整套评估（等 checkpoint 存好才跑，可与训练同时进行）：`lift_eval`（含 TEMPO：周期是否在 Fast06 ±10%）、`lift_pose` CRIT、`posture_batch_eval`。
-- `record_video.py <task> <ckpt.pt> <out.mp4> [segments=0:3,0.3:4,0.6:5,0.8:5,1.0:6,1.3:6] [w=854] [h=480] [title]` — 离屏录影（`MUJOCO_GL=egl`），左前方跟拍、由慢到快，画面标注指令 / 实际速度与两轮离地高度。
+- `record_video.py <task> <ckpt.pt> <out.mp4> [segments=0:3,0.3:4,0.6:5,0.8:5,1.0:6,1.3:6] [w=854] [h=480] [title]` — 离屏录影（`MUJOCO_GL=egl`），左前方跟拍、由慢到快，画面标注指令 / 实际速度与两轮离地高度。分段也可以写 `速度:转弯角速度:秒`（例如 `1.0:1.3:5`），画面另外标注转弯指令 / 实际角速度。
 - `record_reference.py <out.mp4> [clip=.../skatingfast06.pkl] [start_s=2] [seconds=12] [w] [h] [title]` — 参考动捕片段按同样机位回放（无物理），用来和策略影片并排对照。
 - `train_curve.py <train.log> [window=100] [metric substrings]` — 从训练 log 按区间平均 task / style 奖励与各项指标（判断"奖励不再增长就停"）。
 
