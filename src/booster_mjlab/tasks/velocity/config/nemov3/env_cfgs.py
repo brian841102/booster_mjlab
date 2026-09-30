@@ -27,6 +27,7 @@ Differences from the K1 config this is adapted from
 from __future__ import annotations
 
 import dataclasses
+import re
 
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg, JointVelocityActionCfg
@@ -281,6 +282,7 @@ def nemov3_flat_env_cfg(
     arm_yaw: bool = False,
     upright_std_moving: float | None = None,
     lift_clock: bool | str = False,
+    fixed_joints: tuple[str, ...] = (),
 ) -> ManagerBasedRlEnvCfg:
     """Create Nemov3 flat-terrain velocity tracking configuration.
 
@@ -301,6 +303,10 @@ def nemov3_flat_env_cfg(
     upper-body posture penalty and enlarges the shoulder / pelvis yaw action scale. ``upright_std_moving`` overrides
     the tilt tolerance of the ``upright`` reward while moving (standing keeps its own), see UPRIGHT_STD_MOVING_RELAXED.
 
+    ``fixed_joints`` (e.g. NEMOV3_FIXED_HEAD_WAIST_JOINTS) are welded in the model for hardware that does not actuate
+    them: they leave the actions and observations, and reward terms drop them. The AMP clips must drop their columns
+    too (dataset transform drop_fixed_head_waist_joints; config/nemov3/__init__.py does that for such tasks).
+
     With ``foot_lift=True`` (or ``"k1"``) adds K1-style air-time / clearance /
     swing-height rewards for the wheels, targeting the foot lift measured in
     Fast06 (Exp 25: no lift learned). ``foot_lift="shaped"`` instead adds a
@@ -320,7 +326,8 @@ def nemov3_flat_env_cfg(
     """
     cfg = make_velocity_env_cfg()
 
-    cfg.scene.entities = {"robot": get_nemov3_robot_cfg()}
+    cfg.scene.entities = {"robot": get_nemov3_robot_cfg(fixed_joints=fixed_joints)}
+    position_joints = tuple(name for name in NEMOV3_POSITION_JOINT_NAMES if name not in fixed_joints)
 
     # Flat terrain only. K1's own buffer sizes are fine here (verified at
     # num_envs=4096, 10 iterations, no NaN, no OOM) -- an earlier NaN was
@@ -386,7 +393,7 @@ def nemov3_flat_env_cfg(
     # control for the wheels (matches the MJCF's own actuator types).
     cfg.actions["joint_pos"] = JointPositionActionCfg(
         entity_name="robot",
-        actuator_names=NEMOV3_POSITION_JOINT_NAMES,
+        actuator_names=position_joints,
         scale=NEMOV3_ACTION_SCALE,
         use_default_offset=True,
     )
@@ -696,7 +703,7 @@ def nemov3_flat_env_cfg(
     if not NEMOV3_OBSERVE_WHEEL_ANGLE:
         for group_name in ("actor", "critic"):
             cfg.observations[group_name].terms["joint_pos"].params["asset_cfg"] = (
-                SceneEntityCfg("robot", joint_names=NEMOV3_POSITION_JOINT_NAMES)
+                SceneEntityCfg("robot", joint_names=position_joints)
             )
 
     if clock:
@@ -727,4 +734,22 @@ def nemov3_flat_env_cfg(
         if not turn:
             twist_cmd.ranges.ang_vel_z = (0.0, 0.1)
 
+    if fixed_joints:
+        _drop_fixed_joints(cfg, position_joints)
+
     return cfg
+
+
+def _drop_fixed_joints(cfg: ManagerBasedRlEnvCfg, position_joints: tuple[str, ...]) -> None:
+    """Drop joint-name keys / patterns that match no remaining position joint (the welded joints) from the action
+    scale and the upper-body posture reward, which list joints by name."""
+
+    def active(pattern: str) -> bool:
+        return any(re.fullmatch(pattern, name) for name in position_joints)
+
+    action = cfg.actions["joint_pos"]
+    action.scale = {k: v for k, v in action.scale.items() if active(k)}
+    posture = cfg.rewards["upper_body_posture"].params
+    posture["asset_cfg"].joint_names = tuple(p for p in posture["asset_cfg"].joint_names if active(p))
+    for key in ("std_standing", "std_walking", "std_running"):
+        posture[key] = {k: v for k, v in posture[key].items() if active(k)}
