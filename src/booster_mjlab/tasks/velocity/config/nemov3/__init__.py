@@ -2,6 +2,7 @@ from mjlab.managers.observation_manager import ObservationTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.tasks.registry import register_mjlab_task
 
+from booster_mjlab.robots.nemov3.nemov3_constants import NEMOV3_FIXED_HEAD_WAIST_JOINTS
 from booster_mjlab.tasks.velocity.config import with_amp_obs_group
 from booster_mjlab.tasks.velocity.mdp.wheel_feet import (
     GATED_AMP_JOINTS,
@@ -74,6 +75,10 @@ NEMOV3_LIFT_6CM_SPEED_EXPERT_FN = "booster_mjlab.tasks.velocity.mdp.wheel_feet:l
 # did not capture (dataset transform).
 NEMOV3_GATED_LIFT_EXPERT_FN = "booster_mjlab.tasks.velocity.mdp.wheel_feet:gated_lift_features_from_motion"
 NEMOV3_NOISE_UNCAPTURED_TRANSFORM = "booster_mjlab.tasks.velocity.mdp.wheel_feet:noise_uncaptured_joints"
+# Clips for a robot with NEMOV3_FIXED_HEAD_WAIST_JOINTS welded: their dof_pos columns dropped.
+NEMOV3_DROP_FIXED_HEAD_WAIST_TRANSFORM = (
+    "booster_mjlab.robots.nemov3.nemov3_constants:drop_fixed_head_waist_joints"
+)
 
 
 def with_nemov3_lift_features(cfg, gated=False):
@@ -146,6 +151,7 @@ def _with_amp_reset_cfg(
     lift_features=None,
     gated=False,
     style_weight=NEMOV3_STYLE_REWARD_WEIGHT,
+    reset_transform=False,
 ):
     cfg = with_amp_obs_group(
         env_cfg,
@@ -160,6 +166,9 @@ def _with_amp_reset_cfg(
     style_params = cfg.curriculum["amp_style_weight"].params
     style_params["start_weight"] = style_weight
     style_params["end_weight"] = style_weight
+    if reset_transform:
+        # The reset poses come from the same clips: a robot with welded joints needs their columns dropped there too.
+        cfg.events["reset_robot_from_motion"].params["dataset_transform"] = runner_cfg.dataset_transform
     cfg = with_nemov3_amp_joints(cfg, joint_names)
     return with_nemov3_lift_features(cfg, gated) if lift_features else cfg
 
@@ -180,7 +189,13 @@ def _register(
     """
     env_kwargs = env_kwargs or {}
     rl_kwargs = {**(rl_kwargs or {}), **({"amp_extra_obs_fn": lift_features} if lift_features else {})}
-    amp_args = (amp_joints, lift_features, gated, style_weight)
+    fixed = bool(env_kwargs.get("fixed_joints"))
+    if fixed:
+        # The clip transform drops exactly NEMOV3_FIXED_HEAD_WAIST_JOINTS; another set needs its own transform.
+        assert tuple(env_kwargs["fixed_joints"]) == NEMOV3_FIXED_HEAD_WAIST_JOINTS, "no clip transform for this set"
+        assert "dataset_transform" not in rl_kwargs, "fixed_joints tasks use the column-dropping clip transform"
+        rl_kwargs["dataset_transform"] = NEMOV3_DROP_FIXED_HEAD_WAIST_TRANSFORM
+    amp_args = (amp_joints, lift_features, gated, style_weight, fixed)
     for use_muon in (False, True):
         rl_cfg = nemov3_amp_ppo_runner_cfg(use_muon=use_muon, **rl_kwargs)
         register_mjlab_task(
@@ -225,6 +240,26 @@ _register(
     "-Clock-Arms-NarrowStance-Mirror-SymLoss-Turn",
     {**_NARROW, "symmetric_default": True, "turn": True},
     {"mirror": True, "mirror_loss_coeff": NEMOV3_MIRROR_LOSS_COEFF},
+    NEMOV3_AMP_ARM_JOINT_NAMES,
+)
+# Exp 78 (user, 2026-09-29: deploy the turning policy Exp 41 on the hardware, whose head and waist cannot move yet):
+# the same task with NEMOV3_FIXED_HEAD_WAIST_JOINTS welded -- head roll / pitch / yaw, waist yaw / pitch / roll, the
+# waist push-rod linkages and the wrist pitch joints; 20 joints remain (18 position + 2 wheels).
+_register(
+    "-Clock-Arms-NarrowStance-Mirror-SymLoss-Turn-FixHeadWaist",
+    {**_NARROW, "symmetric_default": True, "turn": True, "fixed_joints": NEMOV3_FIXED_HEAD_WAIST_JOINTS},
+    {"mirror": True, "mirror_loss_coeff": NEMOV3_MIRROR_LOSS_COEFF},
+    NEMOV3_AMP_ARM_JOINT_NAMES,
+)
+# Exp 79: Exp 78 with the left/right symmetric reference clips (Exp 36's data; it evened out the elbow swing).
+_register(
+    "-Clock-Arms-NarrowStance-SymClips-SymLoss-Turn-FixHeadWaist",
+    {**_NARROW, "symmetric_default": True, "turn": True, "fixed_joints": NEMOV3_FIXED_HEAD_WAIST_JOINTS},
+    {
+        "mirror": True,
+        "mirror_loss_coeff": NEMOV3_MIRROR_LOSS_COEFF,
+        "dataset_root": NEMOV3_AMP_DATASET_ROOT_SYMMETRIC,
+    },
     NEMOV3_AMP_ARM_JOINT_NAMES,
 )
 # Foot-lift skating (docs/nemov3_foot_lift_plan.md; tools/nemov3_finetune.md, section 抬脚). Only the runs the log keeps
