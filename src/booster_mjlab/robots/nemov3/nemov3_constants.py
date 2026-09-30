@@ -12,10 +12,13 @@ way ``booster_k1/k1_constants.py`` does for K1's own motors.
 
 from __future__ import annotations
 
+import dataclasses
+import functools
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import mujoco
+import numpy as np
 from mjlab.actuator import XmlActuatorCfg
 from mjlab.entity import EntityCfg
 from mjlab.entity.entity import EntityArticulationInfoCfg
@@ -35,12 +38,46 @@ NEMOV3_XML: Path = (
 assert NEMOV3_XML.exists()
 
 
-def get_spec() -> mujoco.MjSpec:
+def get_spec(fixed_joints: tuple[str, ...] = ()) -> mujoco.MjSpec:
+    """Load nemov3.xml. ``fixed_joints`` are welded: the joint and its actuator are removed and the child body is
+    fixed at the joint's HOME_KEYFRAME angle (see NEMOV3_FIXED_HEAD_WAIST_JOINTS)."""
     spec = mujoco.MjSpec.from_file(str(NEMOV3_XML))
     for geom in spec.geoms:
         if geom.name and "_collision" in geom.name.lower():
             geom.group = 3
+    for name in fixed_joints:
+        _weld_joint(spec, name, HOME_KEYFRAME.joint_pos.get(name, 0.0))
     return spec
+
+
+def _weld_joint(spec: mujoco.MjSpec, name: str, q: float) -> None:
+    """Remove joint ``name`` (and the actuators driving it), baking the joint value ``q`` into its body's frame."""
+    joint = spec.joint(name)
+    body = joint.parent
+    if q != 0.0:
+        axis = np.asarray(joint.axis, dtype=np.float64) / np.linalg.norm(joint.axis)
+        body_quat = np.asarray(body.quat, dtype=np.float64)
+        if joint.type == mujoco.mjtJoint.mjJNT_HINGE:
+            # Rotation by q about the joint axis through the joint anchor (body frame).
+            dq = np.zeros(4)
+            mujoco.mju_axisAngle2Quat(dq, axis, q)
+            anchor = np.asarray(joint.pos, dtype=np.float64)
+            rotated = np.zeros(3)
+            mujoco.mju_rotVecQuat(rotated, anchor, dq)
+            local_shift = anchor - rotated
+            new_quat = np.zeros(4)
+            mujoco.mju_mulQuat(new_quat, body_quat, dq)
+            body.quat = new_quat
+        elif joint.type == mujoco.mjtJoint.mjJNT_SLIDE:
+            local_shift = axis * q
+        else:
+            raise ValueError(f"Cannot weld joint '{name}' of type {joint.type}")
+        shift = np.zeros(3)
+        mujoco.mju_rotVecQuat(shift, local_shift, body_quat)
+        body.pos = np.asarray(body.pos, dtype=np.float64) + shift
+    for actuator in [a for a in spec.actuators if a.target == name]:
+        spec.delete(actuator)
+    spec.delete(joint)
 
 
 ##
@@ -297,18 +334,74 @@ NEMOV3_ARTICULATION = EntityArticulationInfoCfg(
 )
 
 
+##
+# Fixed (welded) joints.
+##
+
+# Joints the current hardware does not actuate yet (user, 2026-09-29: head and waist mechanisms not designed): head
+# roll / pitch / yaw, the waist (pelvis yaw / pitch / roll) and its two push-rod linkages (LinearOut hinge + Linear
+# slide per side, hanging from link_pelvisYaw), and the distal wrist joint (wrist pitch; wrist roll stays). Welding them
+# in the model (get_spec(fixed_joints)) makes them rigid like the locked hardware -- holding them with their PD
+# actuators instead would leave the waist compliant (kp 50 Nm/rad, 20 Nm). Tasks pick the set per robot build, so the
+# joints come back by leaving them out of the set.
+NEMOV3_FIXED_HEAD_WAIST_JOINTS: tuple[str, ...] = (
+    "head_roll_joint",
+    "head_pitch_joint",
+    "head_yaw_joint",
+    "joint_pelvisYaw",
+    "joint_pelvisPitch",
+    "joint_pelvisRoll",
+    "joint_rLinearOut",
+    "joint_rLinear",
+    "joint_lLinearOut",
+    "joint_lLinear",
+    "joint_rWristPitch",
+    "joint_lWristPitch",
+)
+
+
+def nemov3_active_joint_names(fixed_joints: tuple[str, ...] = ()) -> tuple[str, ...]:
+    """NEMOV3_JOINT_ORDER without ``fixed_joints`` (= the robot's joint order when they are welded)."""
+    return tuple(name for name in NEMOV3_JOINT_ORDER if name not in fixed_joints)
+
+
+def drop_fixed_head_waist_joints(motion_file):
+    """``dataset_transform`` for a robot built with NEMOV3_FIXED_HEAD_WAIST_JOINTS: drops their columns from the clips'
+    ``dof_pos`` (NEMOV3_JOINT_ORDER, 32 columns) so the clips match the robot's joints. Runs after the augmentations
+    (the mirror needs all 32 columns)."""
+    keep = [NEMOV3_JOINT_ORDER.index(name) for name in nemov3_active_joint_names(NEMOV3_FIXED_HEAD_WAIST_JOINTS)]
+    return dataclasses.replace(motion_file, dof_pos=np.asarray(motion_file.dof_pos)[:, keep])
+
+
 def get_nemov3_robot_cfg(
     default_keyframe: EntityCfg.InitialStateCfg = HOME_KEYFRAME,
+    fixed_joints: tuple[str, ...] = (),
 ) -> EntityCfg:
     """Get a fresh Nemov3 robot configuration instance.
 
     Returns a new EntityCfg instance each time to avoid mutation issues when
-    the config is shared across multiple places.
+    the config is shared across multiple places. ``fixed_joints`` are welded (see get_spec).
     """
+    if not fixed_joints:
+        return EntityCfg(
+            init_state=default_keyframe,
+            spec_fn=get_spec,
+            articulation=NEMOV3_ARTICULATION,
+        )
+    fixed_joints = tuple(fixed_joints)
     return EntityCfg(
-        init_state=default_keyframe,
-        spec_fn=get_spec,
-        articulation=NEMOV3_ARTICULATION,
+        init_state=dataclasses.replace(
+            default_keyframe,
+            joint_pos={k: v for k, v in default_keyframe.joint_pos.items() if k not in fixed_joints},
+        ),
+        spec_fn=functools.partial(get_spec, fixed_joints),
+        articulation=EntityArticulationInfoCfg(
+            actuators=tuple(
+                XmlActuatorCfg(target_names_expr=(joint_name,))
+                for joint_name in _joint_names_in_actuator_order(get_spec(fixed_joints))
+            ),
+            soft_joint_pos_limit_factor=0.9,
+        ),
     )
 
 
