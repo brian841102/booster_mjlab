@@ -1,3 +1,5 @@
+import re
+
 from mjlab.managers.observation_manager import ObservationTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.tasks.registry import register_mjlab_task
@@ -5,6 +7,7 @@ from mjlab.tasks.registry import register_mjlab_task
 from booster_mjlab.robots.nemov3.nemov3_constants import (
     NEMOV3_DELAY_GROUPS,
     NEMOV3_FIXED_HEAD_WAIST_JOINTS,
+    nemov3_active_joint_names,
 )
 from booster_mjlab.tasks.velocity.config import with_amp_obs_group
 from booster_mjlab.tasks.velocity.mdp.motor_dynamics import ActuatorDelayCfg, MotorTargetDynamicsCfg
@@ -199,6 +202,9 @@ def _register(
         assert tuple(env_kwargs["fixed_joints"]) == NEMOV3_FIXED_HEAD_WAIST_JOINTS, "no clip transform for this set"
         assert "dataset_transform" not in rl_kwargs, "fixed_joints tasks use the column-dropping clip transform"
         rl_kwargs["dataset_transform"] = NEMOV3_DROP_FIXED_HEAD_WAIST_TRANSFORM
+        # The discriminator cannot score welded joints (e.g. pelvis yaw in NEMOV3_AMP_SKATE_JOINT_NAMES).
+        active = nemov3_active_joint_names(NEMOV3_FIXED_HEAD_WAIST_JOINTS)
+        amp_joints = tuple(p for p in amp_joints if any(re.fullmatch(p, name) for name in active))
     amp_args = (amp_joints, lift_features, gated, style_weight, fixed)
     for use_muon in (False, True):
         rl_cfg = nemov3_amp_ppo_runner_cfg(use_muon=use_muon, **rl_kwargs)
@@ -398,6 +404,32 @@ for _suffix, _clock in (("-ClockWindow", True), ("-ClockWindow2", "compensated")
         NEMOV3_AMP_SKATE_JOINT_NAMES,
         NEMOV3_LIFT_6CM_SPEED_EXPERT_FN,
     )
+# Exp 80 (user, 2026-09-30: a foot-lift model for the hardware with the head and waist fixed): Exp 77a2 with the same
+# 12 joints welded as Exp 78. The waist twist goes with pelvis yaw (the discriminator no longer scores it); the
+# diagonal arm swing stays on shoulder yaw.
+_register(
+    "-Clock-Arms-NarrowStance-Mirror-SymLoss-Lift-Staged-ClockWindow2-FixHeadWaist",
+    {**_NATURAL, "lift": "staged", "lift_clock": "compensated", "fixed_joints": NEMOV3_FIXED_HEAD_WAIST_JOINTS},
+    _LIFT_RL,
+    NEMOV3_AMP_SKATE_JOINT_NAMES,
+    NEMOV3_LIFT_6CM_SPEED_EXPERT_FN,
+)
+# Exp 87 (user, 2026-10-14): the foot-lift skating of Exp 80 with Exp 85's sim-to-real setup (the hardware's PD gains +
+# the merged actuator delay) -- a deployable foot-lift model.
+_register(
+    "-Clock-Arms-NarrowStance-Mirror-SymLoss-Lift-Staged-ClockWindow2-FixHeadWaist-DeployPD-MergedDelay",
+    {
+        **_NATURAL,
+        "lift": "staged",
+        "lift_clock": "compensated",
+        "fixed_joints": NEMOV3_FIXED_HEAD_WAIST_JOINTS,
+        "deploy_pd": True,
+        "actuator_delay": NEMOV3_MERGED_DELAY,
+    },
+    _LIFT_RL,
+    NEMOV3_AMP_SKATE_JOINT_NAMES,
+    NEMOV3_LIFT_6CM_SPEED_EXPERT_FN,
+)
 # + reference clips made left/right symmetric one by one (Exp 36+).
 _register(
     "-Clock-Arms-NarrowStance-SymClips-SymLoss",
