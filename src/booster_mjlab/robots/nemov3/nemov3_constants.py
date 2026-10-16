@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -38,15 +39,27 @@ NEMOV3_XML: Path = (
 assert NEMOV3_XML.exists()
 
 
-def get_spec(fixed_joints: tuple[str, ...] = ()) -> mujoco.MjSpec:
+def get_spec(
+    fixed_joints: tuple[str, ...] = (), pd_gains: tuple[tuple[str, float, float], ...] = ()
+) -> mujoco.MjSpec:
     """Load nemov3.xml. ``fixed_joints`` are welded: the joint and its actuator are removed and the child body is
-    fixed at the joint's HOME_KEYFRAME angle (see NEMOV3_FIXED_HEAD_WAIST_JOINTS)."""
+    fixed at the joint's HOME_KEYFRAME angle (see NEMOV3_FIXED_HEAD_WAIST_JOINTS). ``pd_gains`` = (joint regex, kp,
+    kd) entries that override the XML gains of the matching joints' position actuators (see NEMOV3_DEPLOY_PD_GAINS)."""
     spec = mujoco.MjSpec.from_file(str(NEMOV3_XML))
     for geom in spec.geoms:
         if geom.name and "_collision" in geom.name.lower():
             geom.group = 3
     for name in fixed_joints:
         _weld_joint(spec, name, HOME_KEYFRAME.joint_pos.get(name, 0.0))
+    for pattern, kp, kd in pd_gains:
+        matched = [a for a in spec.actuators if re.fullmatch(pattern, a.target)]
+        assert matched, f"pd_gains: no actuator for '{pattern}'"
+        for actuator in matched:
+            # <position>: force = kp * (target - q) - kd * qdot, i.e. gainprm[0] = kp, biasprm[1:3] = (-kp, -kd).
+            assert actuator.biastype == mujoco.mjtBias.mjBIAS_AFFINE, f"{actuator.name} is not a position actuator"
+            actuator.gainprm[0] = kp
+            actuator.biasprm[1] = -kp
+            actuator.biasprm[2] = -kd
     return spec
 
 
@@ -373,31 +386,68 @@ def drop_fixed_head_waist_joints(motion_file):
     return dataclasses.replace(motion_file, dof_pos=np.asarray(motion_file.dof_pos)[:, keep])
 
 
+##
+# Hardware actuation.
+##
+
+# The PD gains the hardware runs (user, 2026-10-12: "上身电机训练PD 过大 之后请按照实际部署PD 来训练"); the XML has kp 50 /
+# kd 0.5 on every position joint. The legs (50 / 0.5) and the wheels (velocity control, kd 0.5) already match.
+# (joint regex, kp, kd).
+NEMOV3_DEPLOY_PD_GAINS: tuple[tuple[str, float, float], ...] = (
+    (r"joint_[rl]Shoulder(Pitch|Roll)", 18.0, 0.8),
+    (r"joint_[rl](ShoulderYaw|Elbow|WristRoll)", 1.5, 0.1),
+)
+
+# Command latency of the hardware's motor bus (flamingo_rl_train's DelayedPD actuators: 0-4 physics steps, one lag per
+# actuator group, drawn at reset and kept for the episode). The buffers never resample on their own (hold_prob 1); the
+# env's reset event mdp/motor_dynamics.py:sample_actuator_delay sets the lags per group.
+NEMOV3_DELAY_GROUPS: tuple[str, ...] = (
+    r"joint_[rl](Shoulder.*|Elbow|Wrist.*)",  # arms
+    r".*_(hip_.*|calf)_joint",  # legs
+    r".*_wheel_joint",  # wheels
+    r"joint_pelvis.*",  # waist (welded on the current hardware)
+    r"head_.*_joint|joint_[rl]Linear.*",  # head, waist push rods (welded)
+)
+
+
 def get_nemov3_robot_cfg(
     default_keyframe: EntityCfg.InitialStateCfg = HOME_KEYFRAME,
     fixed_joints: tuple[str, ...] = (),
+    pd_gains: tuple[tuple[str, float, float], ...] = (),
+    actuator_delay_steps: int = 0,
 ) -> EntityCfg:
     """Get a fresh Nemov3 robot configuration instance.
 
     Returns a new EntityCfg instance each time to avoid mutation issues when
-    the config is shared across multiple places. ``fixed_joints`` are welded (see get_spec).
+    the config is shared across multiple places. ``fixed_joints`` are welded and ``pd_gains`` override the XML gains
+    (see get_spec); ``actuator_delay_steps`` > 0 gives every actuator a command delay buffer of up to N physics steps
+    whose lag the env sets at reset (NEMOV3_DELAY_GROUPS).
     """
-    if not fixed_joints:
+    if not (fixed_joints or pd_gains or actuator_delay_steps):
         return EntityCfg(
             init_state=default_keyframe,
             spec_fn=get_spec,
             articulation=NEMOV3_ARTICULATION,
         )
-    fixed_joints = tuple(fixed_joints)
+    fixed_joints, pd_gains = tuple(fixed_joints), tuple(pd_gains)
+    delay = (
+        {
+            "delay_min_lag": 0,
+            "delay_max_lag": actuator_delay_steps,
+            "delay_hold_prob": 1.0,  # never resampled by the buffer; set per group at reset
+        }
+        if actuator_delay_steps
+        else {}
+    )
     return EntityCfg(
         init_state=dataclasses.replace(
             default_keyframe,
             joint_pos={k: v for k, v in default_keyframe.joint_pos.items() if k not in fixed_joints},
         ),
-        spec_fn=functools.partial(get_spec, fixed_joints),
+        spec_fn=functools.partial(get_spec, fixed_joints, *((pd_gains,) if pd_gains else ())),
         articulation=EntityArticulationInfoCfg(
             actuators=tuple(
-                XmlActuatorCfg(target_names_expr=(joint_name,))
+                XmlActuatorCfg(target_names_expr=(joint_name,), **delay)
                 for joint_name in _joint_names_in_actuator_order(get_spec(fixed_joints))
             ),
             soft_joint_pos_limit_factor=0.9,
