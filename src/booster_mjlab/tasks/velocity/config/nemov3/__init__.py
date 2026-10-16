@@ -2,8 +2,12 @@ from mjlab.managers.observation_manager import ObservationTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.tasks.registry import register_mjlab_task
 
-from booster_mjlab.robots.nemov3.nemov3_constants import NEMOV3_FIXED_HEAD_WAIST_JOINTS
+from booster_mjlab.robots.nemov3.nemov3_constants import (
+    NEMOV3_DELAY_GROUPS,
+    NEMOV3_FIXED_HEAD_WAIST_JOINTS,
+)
 from booster_mjlab.tasks.velocity.config import with_amp_obs_group
+from booster_mjlab.tasks.velocity.mdp.motor_dynamics import ActuatorDelayCfg, MotorTargetDynamicsCfg
 from booster_mjlab.tasks.velocity.mdp.wheel_feet import (
     GATED_AMP_JOINTS,
     base_forward_speed,
@@ -260,6 +264,54 @@ _register(
         "mirror_loss_coeff": NEMOV3_MIRROR_LOSS_COEFF,
         "dataset_root": NEMOV3_AMP_DATASET_ROOT_SYMMETRIC,
     },
+    NEMOV3_AMP_ARM_JOINT_NAMES,
+)
+# Sim-to-real for the turning policy (user, 2026-10-12, after Exp 78 vibrated violently on the hardware; the
+# timing model is flamingo_rl_train's, see tools/nemov3_finetune.md). Each step adds one item to the one before:
+# Exp 81 the hardware's PD gains (NEMOV3_DEPLOY_PD_GAINS); Exp 82 + a per-episode actuator command delay of 0-20 ms;
+# Exp 83 + the motor-target delay 0-30 ms (motor rate fixed at the hardware's 200 Hz, no low-pass). (Exp 84, + a
+# low-pass tau 0-30 ms, was strange and asymmetric on the hardware; its task was removed, see tools/nemov3_finetune.md.)
+NEMOV3_ACTUATOR_DELAY_STEPS = 4
+NEMOV3_MOTOR_DELAY = MotorTargetDynamicsCfg(control_hz_choices=(200.0,), delay_range_s=(0.0, 0.03))
+_TURN_FIXED = {**_NARROW, "symmetric_default": True, "turn": True, "fixed_joints": NEMOV3_FIXED_HEAD_WAIST_JOINTS}
+_DEPLOY_PD = {**_TURN_FIXED, "deploy_pd": True}
+_ACT_DELAY = {**_DEPLOY_PD, "actuator_delay_steps": NEMOV3_ACTUATOR_DELAY_STEPS}
+for _suffix, _env in (
+    ("-DeployPD", _DEPLOY_PD),
+    ("-DeployPD-ActDelay", _ACT_DELAY),
+    ("-DeployPD-ActDelay-CmdDelay", {**_ACT_DELAY, "motor_dynamics": NEMOV3_MOTOR_DELAY}),
+):
+    _register(
+        "-Clock-Arms-NarrowStance-Mirror-SymLoss-Turn-FixHeadWaist" + _suffix,
+        _env,
+        {"mirror": True, "mirror_loss_coeff": NEMOV3_MIRROR_LOSS_COEFF},
+        NEMOV3_AMP_ARM_JOINT_NAMES,
+    )
+# Exp 85 (user, after the hardware tests -- Exp 83 best): Exp 83's two delays in series merged into one buffer. Two
+# pure delays add, so per joint group (arms / legs / wheels) the lag = an actuator lag uniform 0-4 steps + a
+# motor-target lag round(uniform(0, 30 ms) / 5 ms) shared per action term (arms + legs, wheels): same distribution
+# (0-50 ms, peak 25 ms) and grouping as Exp 83, so the same training conditions without MotorTargetDynamics.
+# (Exp 86, the simplified version with one uniform 0-50 ms lag for the whole body, was shakier on the hardware; its task
+# was removed, see tools/nemov3_finetune.md.)
+NEMOV3_MERGED_DELAY = ActuatorDelayCfg(
+    groups=NEMOV3_DELAY_GROUPS,
+    max_lag=NEMOV3_ACTUATOR_DELAY_STEPS,
+    cmd_groups=(r"(?!.*_wheel_joint$).*", r".*_wheel_joint"),
+    cmd_delay_range_s=NEMOV3_MOTOR_DELAY.delay_range_s,
+)
+_register(
+    "-Clock-Arms-NarrowStance-Mirror-SymLoss-Turn-FixHeadWaist-DeployPD-MergedDelay",
+    {**_DEPLOY_PD, "actuator_delay": NEMOV3_MERGED_DELAY},
+    {"mirror": True, "mirror_loss_coeff": NEMOV3_MIRROR_LOSS_COEFF},
+    NEMOV3_AMP_ARM_JOINT_NAMES,
+)
+# Exp 88 (user, 2026-10-14: Exp 85 falls after standing still long on the hardware): Exp 85 + the torso mass
+# randomization (-1..+1 kg; the COM draw of Exp 85's trunk_inertia event stays, +-5 cm per axis), flamingo_rl_train's old
+# recipe. (The variant that replaced the COM draw by flamingo's +-3 cm was never trained and its task was removed.)
+_register(
+    "-Clock-Arms-NarrowStance-Mirror-SymLoss-Turn-FixHeadWaist-DeployPD-MergedDelay-TrunkMass",
+    {**_DEPLOY_PD, "actuator_delay": NEMOV3_MERGED_DELAY, "trunk_mass_com": "mass"},
+    {"mirror": True, "mirror_loss_coeff": NEMOV3_MIRROR_LOSS_COEFF},
     NEMOV3_AMP_ARM_JOINT_NAMES,
 )
 # Foot-lift skating (docs/nemov3_foot_lift_plan.md; tools/nemov3_finetune.md, section 抬脚). Only the runs the log keeps
