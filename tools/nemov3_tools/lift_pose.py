@@ -124,6 +124,7 @@ def policy(task, ckpt, n, vxs, steps, tag, rows):
     from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 
     import booster_mjlab.tasks.velocity.config.nemov3  # noqa: F401
+    from booster_mjlab.robots.nemov3.nemov3_constants import HOME_KEYFRAME
 
     env_cfg = load_env_cfg(task, play=True)
     env_cfg.scene.num_envs = n
@@ -141,7 +142,9 @@ def policy(task, ckpt, n, vxs, steps, tag, rows):
     robot = env.scene["robot"]
     bids = [robot.body_names.index(b) for b in BODIES]
     rid = robot.body_names.index(ROOT_BODY)
-    jids = [robot.joint_names.index(j) for j in JOINTS]
+    # A welded joint (fixed_joints, e.g. pelvis yaw) is not in the robot: it stays at its HOME_KEYFRAME angle.
+    jids = [robot.joint_names.index(j) for j in JOINTS if j in robot.joint_names]
+    welded = {i: HOME_KEYFRAME.joint_pos.get(j, 0.0) for i, j in enumerate(JOINTS) if j not in robot.joint_names}
     for vx in vxs:
         tw.ranges.lin_vel_x = (vx, vx)
         P, Q, Y = [], [], []
@@ -154,7 +157,10 @@ def policy(task, ckpt, n, vxs, steps, tag, rows):
                 if t >= 100:
                     p = robot.data.body_link_pos_w
                     P.append((p[:, bids] - p[:, rid : rid + 1]).cpu().numpy())
-                    Q.append(robot.data.joint_pos[:, jids].cpu().numpy())
+                    q = robot.data.joint_pos[:, jids].cpu().numpy()
+                    for i, v in welded.items():
+                        q = np.insert(q, i, v, axis=1)
+                    Q.append(q)
                     qq = robot.data.body_link_quat_w[:, rid]
                     Y.append(torch.atan2(2 * (qq[:, 0] * qq[:, 3] + qq[:, 1] * qq[:, 2]),
                                          1 - 2 * (qq[:, 2] ** 2 + qq[:, 3] ** 2)).cpu().numpy())

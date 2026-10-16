@@ -18,7 +18,10 @@ for IT in "$@"; do
   until [ -f "$CK" ]; do sleep 60; done
   sleep 20
   echo "=== $TAG@$IT"
-  uv run python $T/lift_eval.py "$TASK" "$CK" 32 0.8,1.0,1.3 0 600 "$TAG@$IT" 2>/dev/null | grep -E "^LIFT" | tee /dev/stderr \
+  # Kept in a variable, not `tee /dev/stderr`: that reopens a redirected log file at offset 0 and overwrites it.
+  lift=$(uv run python $T/lift_eval.py "$TASK" "$CK" 32 0.8,1.0,1.3 0 600 "$TAG@$IT" 2>/dev/null | grep -E "^LIFT")
+  echo "$lift"
+  echo "$lift" \
     | awk '/vx (1.00|1.30)/ { match($0, /cycle [0-9.]+ s/); c = substr($0, RSTART + 6, RLENGTH - 8);
            ok = (c >= 1.197 && c <= 1.463) ? "ok" : "FAIL"; match($0, /vx [0-9.]+/);
            print "TEMPO " substr($0, RSTART, RLENGTH) " | stride cycle " c " s (Fast06 1.33, +-10% 1.20-1.46) " ok }'
