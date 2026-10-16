@@ -32,6 +32,7 @@ import re
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg, JointVelocityActionCfg
 from mjlab.managers.curriculum_manager import CurriculumTermCfg
+from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.observation_manager import ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
@@ -44,9 +45,18 @@ from booster_mjlab.robots import (
     get_nemov3_robot_cfg,
 )
 from booster_mjlab.robots.nemov3.nemov3_constants import (
+    NEMOV3_DELAY_GROUPS,
+    NEMOV3_DEPLOY_PD_GAINS,
     NEMOV3_POSITION_ACTUATOR_NAME_EXPR,
     NEMOV3_POSITION_JOINT_NAMES,
     NEMOV3_WHEEL_JOINT_NAMES,
+)
+from booster_mjlab.tasks.velocity.mdp.motor_dynamics import (
+    MotorDynamicsJointPositionActionCfg,
+    MotorDynamicsJointVelocityActionCfg,
+    ActuatorDelayCfg,
+    MotorTargetDynamicsCfg,
+    sample_actuator_delay,
 )
 from booster_mjlab.tasks.velocity.mdp.rewards import torso_forward_lean
 from booster_mjlab.tasks.velocity.mdp.stance import hip_roll_excess
@@ -200,6 +210,13 @@ LEAN_FULL_SPEED = 1.0
 LEAN_STD_RAD = 0.1
 LEAN_WEIGHT = 1.0
 
+# Payload uncertainty of the upper body (trunk_mass_com=True, Exp 88; flamingo_rl_train's old recipe "base mass +-1 kg,
+# COM +-3 cm", which it applies to its base body -- here on the torso, the user's "躯干", since link_leg2pelvis weighs
+# only 0.39 kg): a point mass of -1..+1 kg added at the torso's COM (inertia unchanged) and its COM moved by -3..+3 cm
+# per axis, on top of the trunk_inertia event; drawn once per environment at startup.
+TRUNK_MASS_ADD_KG = (-1.0, 1.0)
+TRUNK_COM_OFFSET_M = (-0.03, 0.03)
+
 # Relaxed upright tolerance while moving (upright_std_moving, Exp 59; user: "会不会有可能是水平惩罚太重导致学不出判别器步态"):
 # the upright reward exp(-|g_xy|^2 / std^2) with the moving std 0.5 costs 14 % at Fast06's 11 deg lean (weight 1.0,
 # x0.3 task share ~0.04 / step), about what the discriminator gains from the lean -- so the lean may be cancelled.
@@ -283,6 +300,11 @@ def nemov3_flat_env_cfg(
     upright_std_moving: float | None = None,
     lift_clock: bool | str = False,
     fixed_joints: tuple[str, ...] = (),
+    deploy_pd: bool = False,
+    actuator_delay_steps: int = 0,
+    actuator_delay: ActuatorDelayCfg | None = None,
+    motor_dynamics: MotorTargetDynamicsCfg | None = None,
+    trunk_mass_com: bool | str = False,
 ) -> ManagerBasedRlEnvCfg:
     """Create Nemov3 flat-terrain velocity tracking configuration.
 
@@ -307,6 +329,15 @@ def nemov3_flat_env_cfg(
     them: they leave the actions and observations, and reward terms drop them. The AMP clips must drop their columns
     too (dataset transform drop_fixed_head_waist_joints; config/nemov3/__init__.py does that for such tasks).
 
+    Sim-to-real (Exp 81+): ``deploy_pd=True`` uses the hardware's PD gains (NEMOV3_DEPLOY_PD_GAINS: the arms are far
+    softer than the XML's kp 50); ``actuator_delay_steps`` = N delays the actuator commands by a lag of 0..N physics
+    steps (5 ms each), one per environment and joint group (arms / legs / wheels), drawn at reset; ``actuator_delay``
+    (ActuatorDelayCfg) instead sets the groups / range, optionally with a second, motor-target-style lag on top; ``motor_dynamics`` runs the joint-position and wheel-velocity targets through
+    MotorTargetDynamics (per-episode motor rate hold, transport delay, first-order low-pass; mdp/motor_dynamics.py).
+    ``trunk_mass_com=True`` randomizes the torso payload (TRUNK_MASS_ADD_KG, TRUNK_COM_OFFSET_M); ``"mass"`` only the
+    mass. Both are set relative to the XML values, so they replace the trunk_inertia event's mass / COM draws (+-10 %,
+    +-5 cm per axis) for the torso; with ``"mass"`` its COM draw stays.
+
     With ``foot_lift=True`` (or ``"k1"``) adds K1-style air-time / clearance /
     swing-height rewards for the wheels, targeting the foot lift measured in
     Fast06 (Exp 25: no lift learned). ``foot_lift="shaped"`` instead adds a
@@ -326,7 +357,15 @@ def nemov3_flat_env_cfg(
     """
     cfg = make_velocity_env_cfg()
 
-    cfg.scene.entities = {"robot": get_nemov3_robot_cfg(fixed_joints=fixed_joints)}
+    cfg.scene.entities = {
+        "robot": get_nemov3_robot_cfg(
+            fixed_joints=fixed_joints,
+            pd_gains=NEMOV3_DEPLOY_PD_GAINS if deploy_pd else (),
+            actuator_delay_steps=(
+                actuator_delay.buffer_steps(cfg.sim.mujoco.timestep) if actuator_delay else actuator_delay_steps
+            ),
+        )
+    }
     position_joints = tuple(name for name in NEMOV3_POSITION_JOINT_NAMES if name not in fixed_joints)
 
     # Flat terrain only. K1's own buffer sizes are fine here (verified at
@@ -391,18 +430,24 @@ def nemov3_flat_env_cfg(
 
     # Actions: position control for everything except the wheels, velocity
     # control for the wheels (matches the MJCF's own actuator types).
-    cfg.actions["joint_pos"] = JointPositionActionCfg(
+    pos_action_cls, vel_action_cls, motor = JointPositionActionCfg, JointVelocityActionCfg, {}
+    if motor_dynamics is not None:
+        pos_action_cls, vel_action_cls = MotorDynamicsJointPositionActionCfg, MotorDynamicsJointVelocityActionCfg
+        motor = {"motor_dynamics": motor_dynamics}
+    cfg.actions["joint_pos"] = pos_action_cls(
         entity_name="robot",
         actuator_names=position_joints,
         scale=NEMOV3_ACTION_SCALE,
         use_default_offset=True,
+        **motor,
     )
     cfg.actions["joint_pos"].scale = {**NEMOV3_ACTION_SCALE, **LEG_SWING_ACTION_SCALE}
-    cfg.actions["wheel_vel"] = JointVelocityActionCfg(
+    cfg.actions["wheel_vel"] = vel_action_cls(
         entity_name="robot",
         actuator_names=NEMOV3_WHEEL_JOINT_NAMES,
         scale=NEMOV3_WHEEL_ACTION_SCALE,
         use_default_offset=True,
+        **motor,
     )
 
     cfg.viewer.body_name = TRUNK_BODY
@@ -736,6 +781,39 @@ def nemov3_flat_env_cfg(
 
     if fixed_joints:
         _drop_fixed_joints(cfg, position_joints)
+
+    if actuator_delay_steps:
+        cfg.events["actuator_delay"] = EventTermCfg(
+            func=sample_actuator_delay,
+            mode="reset",
+            params={"groups": NEMOV3_DELAY_GROUPS, "max_lag": actuator_delay_steps},
+        )
+    if trunk_mass_com:
+        torso = SceneEntityCfg("robot", body_names=(TRUNK_BODY,))
+        cfg.events["trunk_mass"] = EventTermCfg(
+            func=mdp.dr.body_mass,
+            mode="startup",
+            params={"asset_cfg": torso, "ranges": TRUNK_MASS_ADD_KG, "operation": "add"},
+        )
+        if trunk_mass_com != "mass":
+            cfg.events["trunk_com"] = EventTermCfg(
+                func=mdp.dr.body_com_offset,
+                mode="startup",
+                params={"asset_cfg": torso, "ranges": TRUNK_COM_OFFSET_M, "operation": "add"},
+            )
+
+    if actuator_delay is not None:
+        assert not actuator_delay_steps, "actuator_delay replaces actuator_delay_steps"
+        cfg.events["actuator_delay"] = EventTermCfg(
+            func=sample_actuator_delay,
+            mode="reset",
+            params={
+                "groups": actuator_delay.groups,
+                "max_lag": actuator_delay.max_lag,
+                "cmd_groups": actuator_delay.cmd_groups,
+                "cmd_delay_range_s": actuator_delay.cmd_delay_range_s,
+            },
+        )
 
     return cfg
 
