@@ -320,6 +320,15 @@ _register(
     {"mirror": True, "mirror_loss_coeff": NEMOV3_MIRROR_LOSS_COEFF},
     NEMOV3_AMP_ARM_JOINT_NAMES,
 )
+# Exp 90 (user, 2026-10-16: Exp 88 spreads its legs wider and wider when driven backward on the hardware; the command was
+# never negative in training): Exp 88 + a backward command in [-0.5, 0] m/s, no new reward.
+NEMOV3_BACKWARD_SPEED = 0.5
+_register(
+    "-Clock-Arms-NarrowStance-Mirror-SymLoss-Turn-FixHeadWaist-DeployPD-MergedDelay-TrunkMass-Backward",
+    {**_DEPLOY_PD, "actuator_delay": NEMOV3_MERGED_DELAY, "trunk_mass_com": "mass", "backward": NEMOV3_BACKWARD_SPEED},
+    {"mirror": True, "mirror_loss_coeff": NEMOV3_MIRROR_LOSS_COEFF},
+    NEMOV3_AMP_ARM_JOINT_NAMES,
+)
 # Foot-lift skating (docs/nemov3_foot_lift_plan.md; tools/nemov3_finetune.md, section 抬脚). Only the runs the log keeps
 # as milestones are registered here; the other experiments are described in the log.
 # Exp 46: single-wheel feasibility probe -- ride on the right wheel with the left one held up, no style reward, hip-roll

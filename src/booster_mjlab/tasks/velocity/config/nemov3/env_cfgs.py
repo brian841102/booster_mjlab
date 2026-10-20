@@ -305,8 +305,12 @@ def nemov3_flat_env_cfg(
     actuator_delay: ActuatorDelayCfg | None = None,
     motor_dynamics: MotorTargetDynamicsCfg | None = None,
     trunk_mass_com: bool | str = False,
+    backward: float = 0.0,
 ) -> ManagerBasedRlEnvCfg:
     """Create Nemov3 flat-terrain velocity tracking configuration.
+
+    With ``backward=V`` (> 0) the forward command is sampled from [-V, 1.3] m/s instead of [0, 1.3] (Exp 90: Exp 83/85/88
+    never saw a negative command and spread the legs to 40+ cm when driven backward). No extra reward.
 
     With ``turn=True`` the yaw-rate command is sampled from [-TURN_YAW_RATE_MAX, TURN_YAW_RATE_MAX] rad/s (left
     and right turns) instead of being pinned to 0.
@@ -462,7 +466,7 @@ def nemov3_flat_env_cfg(
     assert isinstance(twist_cmd, mdp.UniformVelocityCommandCfg)
     twist_cmd.heading_command = False
     twist_cmd.rel_standing_envs = 0.1
-    twist_cmd.ranges.lin_vel_x = (0.0, 1.3)
+    twist_cmd.ranges.lin_vel_x = (0.0 - backward, 1.3)
     twist_cmd.ranges.lin_vel_y = (0.0, 0.0)
     twist_cmd.ranges.ang_vel_z = (-TURN_YAW_RATE_MAX, TURN_YAW_RATE_MAX) if turn else (0.0, 0.0)
     twist_cmd.ranges.heading = None
