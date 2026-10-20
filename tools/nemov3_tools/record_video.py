@@ -1,9 +1,9 @@
 """Render a policy to an mp4 offscreen (no viewer / browser needed), stepping through a list of speed commands.
 
-usage: record_video.py <task> <checkpoint.pt> <out.mp4> [segments=0:3,0.3:4,0.6:5,0.8:5,1.0:6,1.3:6] [width=854]
-                       [height=480] [title]
+usage: record_video.py <task> <checkpoint.pt> <out.mp4> [segments=forward] [width=854] [height=480] [title]
 
-segments = comma-separated "forward speed m/s:seconds" (yaw rate 0) or "forward speed:yaw rate rad/s:seconds" (turning;
+segments = a preset name (PRESETS below: forward, forward-turn, stand, forward-backward-turn) or
+ comma-separated "forward speed m/s:seconds" (yaw rate 0) or "forward speed:yaw rate rad/s:seconds" (turning;
 the caption then shows commanded / actual yaw rate too). One robot, deterministic policy, pushes off,
 tracking camera from the robot's left front. Every frame gets a caption: commanded / actual speed and each wheel's bottom
 height above the ground (so lifts are visible even in a small video). 25 fps real time (every 2nd 50 Hz step).
@@ -23,13 +23,26 @@ from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 
 import booster_mjlab.tasks.velocity.config.nemov3  # noqa: F401
 
+# Named command sequences ("speed:seconds" or "speed:yaw rate:seconds"; a segment is not preceded by a reset).
+PRESETS = {
+    # Slow to fast straight skating: the default of the foot-lift runs (Exp 49+).
+    "forward": "0:3,0.3:4,0.6:5,0.8:5,1.0:6,1.3:6",
+    # Straight, then the turning limits going forward: +-0.6 / +-1.3 rad/s at 1.0 m/s, +1.3 at 0.6 m/s, in place +-1.3, stand.
+    "forward-turn": "0:3,0.6:5,1.0:5,1.3:5,1.0:0.6:5,1.0:-0.6:5,1.0:1.3:5,1.0:-1.3:5,0.6:1.3:5,0:1.3:5,0:-1.3:5,0:3",
+    # 30 s standing still.
+    "stand": "0:30",
+    # Stand, forward, then backward to -0.5 m/s and the turning limits while reversing (+-1.3 rad/s, 5 s each), in place
+    # +-1.3 rad/s (5 s each), stand (Exp 90+).
+    "forward-backward-turn": "0:3,0.6:5,1.0:5,0:2,-0.3:5,-0.5:5,-0.5:1.3:5,-0.5:-1.3:5,0:1.3:5,0:-1.3:5,0:3",
+}
 FONT = "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"
 R_WHEEL = 0.075
 
 
 def main():
     task, ckpt, out = sys.argv[1], sys.argv[2], sys.argv[3]
-    segs = [[float(v) for v in s.split(":")] for s in (sys.argv[4] if len(sys.argv) > 4 else "0:3,0.3:4,0.6:5,0.8:5,1.0:6,1.3:6").split(",")]
+    spec = sys.argv[4] if len(sys.argv) > 4 else "forward"
+    segs = [[float(v) for v in s.split(":")] for s in PRESETS.get(spec, spec).split(",")]
     segs = [(s[0], 0.0, s[1]) if len(s) == 2 else tuple(s) for s in segs]
     turning = any(wz for _, wz, _ in segs)
     width = int(sys.argv[5]) if len(sys.argv) > 5 else 854
