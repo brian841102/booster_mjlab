@@ -18,6 +18,8 @@ nemov3 实验评估脚本（在仓库根目录运行，`.venv/bin/python3 tools/
 - `eval_turn.sh <task> <run dir> <tag> <iteration...>` — 转弯 checkpoint 的整套评估（Exp 41 / 78 / 79 用的那一套；等 checkpoint 存好才跑）：`turn_eval` 转弯网格、`sym_batch_eval` 直行对称、`posture_batch_eval` 姿态 / 站立晃动、`stand_fall_time` 站立 30 s。
 - `eval_tempo.sh <task> <run dir> <tag> <iteration...>` — 一个 checkpoint 的整套评估（等 checkpoint 存好才跑，可与训练同时进行）：`lift_eval`（含 TEMPO：周期是否在 Fast06 ±10%）、`lift_pose` CRIT、`posture_batch_eval`。
 - `record_video.py <task> <ckpt.pt> <out.mp4> [segments=0:3,0.3:4,0.6:5,0.8:5,1.0:6,1.3:6] [w=854] [h=480] [title]` — 离屏录影（`MUJOCO_GL=egl`），左前方跟拍、由慢到快，画面标注指令 / 实际速度与两轮离地高度。分段也可以写 `速度:转弯角速度:秒`（例如 `1.0:1.3:5`），画面另外标注转弯指令 / 实际角速度。
+- `backward_stance.py <task> <ckpt.pt> <tag> [vx=-0.3] [seconds=12] [envs=64] [start=pool|default]` — 后退时两轮会不会越劈越开（Exp 88 实机问题、Exp 90 评估）：静止 3 s 后给 vx，每秒打印两轮横向间距（机体系，cm）、两腿髋 roll、实际 vx、累计摔倒数。通过标准：间距 ≤ 25 cm、髋 roll ≤ 0.14 rad、无摔倒。
+- `asym_probe.py <task> <ckpt.pt> [envs=32] [cases=all|name,name] [stand_s=20] [drive_s=12] [drive_vx=1.0]` — 找出哪一种左右不对称能复现实机症状（Exp 90 站立歪倒 / 走起来不对称）：每个工况单独建环境（关掉所有启动随机化），加一种不对称（左轮 kd / 摩擦、左腿关节零位偏差、躯干质心、IMU 倾斜），量静止与直行的偏航漂移、侧漂、躯干 roll、髋 roll、轮速蠕动。工况在脚本里的 `CASES`。
 - `record_reference.py <out.mp4> [clip=.../skatingfast06.pkl] [start_s=2] [seconds=12] [w] [h] [title]` — 参考动捕片段按同样机位回放（无物理），用来和策略影片并排对照。
 - `train_curve.py <train.log> [window=100] [metric substrings]` — 从训练 log 按区间平均 task / style 奖励与各项指标（判断"奖励不再增长就停"）。
 
