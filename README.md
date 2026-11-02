@@ -77,7 +77,35 @@ uv run play Mjlab-Tracking-Flat-Booster-K1 --wandb-run-path your-org/mjlab/run-i
 
 For a motion prepared with `csv_to_npz`, pass `--registry-name your-org/motions/motion_name` instead.
 
-### 3. Browse Motion Data
+### 3. SuperMimic Motion Tracking (Nemov3)
+
+Train the Nemov3 wheel-legged humanoid to track dance clips retargeted from videos with
+[SuperMimic](docs/supermimic.md): the policy learns by backpropagating a differentiable tracking reward through a
+learned world model, instead of PPO. The clips are made by the `submodules/retarget` pipeline
+(video -> GVHMR -> GMR -> Nemov3) and stay local; see
+[Preparing Motions for Tracking](docs/motion_preparation.md#supermimic-clips-for-mjlab-supermimic-) for making them.
+Every clip in the motion directory (default `submodules/retarget/data/supermimic_motions/nemov3_dance3`, three dances)
+is trained together.
+
+```bash
+git submodule update --init submodules/retarget
+uv run train Mjlab-SuperMimic-Flat-Booster-Nemov3 --agent.run-name exp1
+```
+
+Evaluate every checkpoint while training (normalized return and failed clips, written to the run's `eval.csv`; the
+rollouts are saved as `model_<it>_traj.npz`), then look at the policies in the browser, either replaying the recorded
+rollouts offline (checkpoint dropdown, robot vs. reference ghost, no GPU needed) or running a policy live:
+
+```bash
+uv run evaluate-supermimic Mjlab-SuperMimic-Flat-Booster-Nemov3 --run-dir logs/rsl_rl/nemov3_supermimic/latest --watch True
+uv run replay-supermimic Mjlab-SuperMimic-Flat-Booster-Nemov3 --run-dir logs/rsl_rl/nemov3_supermimic/latest
+uv run play Mjlab-SuperMimic-Flat-Booster-Nemov3 --checkpoint-file logs/rsl_rl/nemov3_supermimic/<run>/model_12000.pt --viewer viser
+```
+
+On three dance clips, 12,000 iterations (~1.2 h on one RTX 4090) reach a normalized return of 0.91-0.93 with no
+failed clip.
+
+### 4. Browse Motion Data
 
 Inspect, play back and edit motion clips in the browser before training on them:
 
@@ -105,7 +133,8 @@ dataset, retargeted onto the parallel-ankle K1:
 
 Velocity tasks come in `Flat` and `Rough` terrain variants, optionally with `-Amp-` (motion prior) and
 `-DA-` (symmetry data augmentation). Tasks suffixed `-Parallel` use the parallel-linkage ankle model of the K1.
-Tracking tasks run on flat terrain. List them all with:
+Tracking tasks (`Mjlab-Tracking-*` with PPO, `Mjlab-SuperMimic-*` with SuperMimic) run on flat terrain. List them all
+with:
 
 ```bash
 uv run list_envs
