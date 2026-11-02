@@ -2,6 +2,7 @@
 
 Adds:
 - FastSAC runner config support (RslRlFastSacRunnerCfg union)
+- SuperMimic runner config support (SuperMimicRunnerCfg union)
 - Unpicklable object cleanup before config YAML serialization
 """
 
@@ -18,12 +19,13 @@ from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg
 
 from booster_mjlab.rl import RslRlFastSacRunnerCfg, RslRlOnPolicyRunnerCfg
 from booster_mjlab.scripts.utils import remove_unpicklable_objects
+from booster_mjlab.supermimic import SuperMimicRunnerCfg
 
 
 @dataclass(frozen=True)
 class TrainConfig:
     env: ManagerBasedRlEnvCfg
-    agent: RslRlOnPolicyRunnerCfg | RslRlFastSacRunnerCfg
+    agent: RslRlOnPolicyRunnerCfg | RslRlFastSacRunnerCfg | SuperMimicRunnerCfg
     registry_name: str | None = None
     video: bool = False
     video_length: int = 200
@@ -41,7 +43,7 @@ class TrainConfig:
     def from_task(task_id: str) -> "TrainConfig":
         env_cfg = load_env_cfg(task_id)
         agent_cfg = load_rl_cfg(task_id)
-        assert isinstance(agent_cfg, (RslRlOnPolicyRunnerCfg, RslRlFastSacRunnerCfg))
+        assert isinstance(agent_cfg, (RslRlOnPolicyRunnerCfg, RslRlFastSacRunnerCfg, SuperMimicRunnerCfg))
         return TrainConfig(env=env_cfg, agent=agent_cfg)
 
 
