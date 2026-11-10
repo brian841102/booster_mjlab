@@ -1,0 +1,31 @@
+# Diagnostic client for wheel_bench_probe.py (the config of amp_left_yaw_probe.yaml plus /motor_driver/enable).
+# Never used by normal AMP/BeyondMimic bringup.
+service:
+  name: motion_control_sim2real_service
+communication:
+  middleware: {}
+  services:
+    /motor_driver/enable:
+      service_ref: motor_driver_service./motor_driver/enable
+      direction: client
+      middlewares: [cyclonedds]
+    /motor_driver/disable:
+      service_ref: motor_driver_service./motor_driver/disable
+      direction: client
+      middlewares: [cyclonedds]
+    /motor_driver/set_mode:
+      service_ref: motor_driver_service./motor_driver/set_mode
+      direction: client
+      middlewares: [cyclonedds]
+  topics:
+    /motor_driver/state:
+      topic_ref: motor_driver_service./motor_driver/state
+      direction: subscribe
+      middlewares: [cyclonedds]
+      qos: {reliability: best_effort, history: keep_last, depth: 1}
+    /motor_driver/command:
+      data: proto
+      type: pacific_rim.motor_driver_service.protocols.pb.MotorCommandArray
+      direction: publish
+      middlewares: [cyclonedds]
+      addresses: {cyclonedds: /motor_driver/command}
