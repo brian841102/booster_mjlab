@@ -22,6 +22,7 @@ visualize-motions = "booster_mjlab.scripts.visualize_motions:main"
 upload-motion = "booster_mjlab.scripts.upload_motion:main"
 motions-to-hf = "booster_mjlab.scripts.motions_to_hf:main"
 export-web-demo = "booster_mjlab.scripts.export_web_demo:main"
+export-onnx = "booster_mjlab.scripts.export_onnx:main"
 
 [build-system]
 requires = ["uv_build>=0.9.5,<0.10.0"]

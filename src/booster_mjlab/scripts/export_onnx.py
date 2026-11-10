@@ -1,7 +1,7 @@
 """Export a trained checkpoint (.pt) to ONNX with metadata. Works for nemov3 / pinov1 (any registered task).
 
 usage:
-  .venv/bin/python tools/export_onnx.py --task <task-id> --checkpoint <run_dir>/model_3000.pt [--out PATH] [--device cpu]
+  uv run export-onnx --task <task-id> --checkpoint <run_dir>/model_3000.pt [--out PATH] [--device cpu]
 
 Default output: <run_dir>/exported/exp<N>_<ckpt stem>.onnx (N parsed from the run dir name, else just <ckpt stem>.onnx).
 Metadata (joint names, PD, default pose, action scale, observation terms...) is attached like training-time export.
@@ -16,8 +16,6 @@ from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg, load_runner_cls
 
-import booster_mjlab.tasks.velocity.config.nemov3  # noqa: F401
-import booster_mjlab.tasks.velocity.config.pinov1  # noqa: F401
 from booster_mjlab.rl.exporter_utils import (
     attach_base_metadata,
     attach_exclusion_metadata,
