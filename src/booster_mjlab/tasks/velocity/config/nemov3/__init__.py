@@ -329,6 +329,52 @@ _register(
     {"mirror": True, "mirror_loss_coeff": NEMOV3_MIRROR_LOSS_COEFF},
     NEMOV3_AMP_ARM_JOINT_NAMES,
 )
+# Exp 91 (user, 2026-10-20: on the hardware the Exp 90 policy rocks at ~5.8 Hz when standing; wheel action scale 16 instead
+# of 20 stops it but the policy snakes at speed): Exp 90 + a random wheel-action gain of +-30 % per episode.
+NEMOV3_WHEEL_GAIN_RANDOM = 0.3
+_register(
+    "-Clock-Arms-NarrowStance-Mirror-SymLoss-Turn-FixHeadWaist-DeployPD-MergedDelay-TrunkMass-Backward-WheelGain",
+    {
+        **_DEPLOY_PD,
+        "actuator_delay": NEMOV3_MERGED_DELAY,
+        "trunk_mass_com": "mass",
+        "backward": NEMOV3_BACKWARD_SPEED,
+        "wheel_gain": NEMOV3_WHEEL_GAIN_RANDOM,
+    },
+    {"mirror": True, "mirror_loss_coeff": NEMOV3_MIRROR_LOSS_COEFF},
+    NEMOV3_AMP_ARM_JOINT_NAMES,
+)
+# Exp 93c (user, 2026-10-21): Exp 91 (random wheel-action gain) + the wheels' armature randomized uniformly in [0, 0.01] per
+# episode (XML default 0.01; armature 0 reproduces the hardware's ~5.9 Hz standing oscillation in simulation, kd unchanged).
+# Best standing on the hardware so far. Exp 92a/b/c (wheel action-rate penalty) and 93a/b (wheel kv randomization) were
+# removed after the hardware tests; see tools/nemov3_finetune.md.
+_register(
+    "-Clock-Arms-NarrowStance-Mirror-SymLoss-Turn-FixHeadWaist-DeployPD-MergedDelay-TrunkMass-Backward-WheelGain-WheelArmature",
+    {
+        **_DEPLOY_PD,
+        "actuator_delay": NEMOV3_MERGED_DELAY,
+        "trunk_mass_com": "mass",
+        "backward": NEMOV3_BACKWARD_SPEED,
+        "wheel_gain": NEMOV3_WHEEL_GAIN_RANDOM,
+        "wheel_armature": (0.0, 0.01),
+    },
+    {"mirror": True, "mirror_loss_coeff": NEMOV3_MIRROR_LOSS_COEFF},
+    NEMOV3_AMP_ARM_JOINT_NAMES,
+)
+# Exp 93d (user, 2026-10-22): Exp 90 + the wheel armature randomization of 93c, WITHOUT the wheel-action gain randomization
+# of Exp 91 (from which the turning got worse: slower yaw tracking, legs moving when rotating in place).
+_register(
+    "-Clock-Arms-NarrowStance-Mirror-SymLoss-Turn-FixHeadWaist-DeployPD-MergedDelay-TrunkMass-Backward-WheelArmature",
+    {
+        **_DEPLOY_PD,
+        "actuator_delay": NEMOV3_MERGED_DELAY,
+        "trunk_mass_com": "mass",
+        "backward": NEMOV3_BACKWARD_SPEED,
+        "wheel_armature": (0.0, 0.01),
+    },
+    {"mirror": True, "mirror_loss_coeff": NEMOV3_MIRROR_LOSS_COEFF},
+    NEMOV3_AMP_ARM_JOINT_NAMES,
+)
 # Foot-lift skating (docs/nemov3_foot_lift_plan.md; tools/nemov3_finetune.md, section 抬脚). Only the runs the log keeps
 # as milestones are registered here; the other experiments are described in the log.
 # Exp 46: single-wheel feasibility probe -- ride on the right wheel with the left one held up, no style reward, hip-roll
