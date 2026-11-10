@@ -51,6 +51,7 @@ from booster_mjlab.robots.nemov3.nemov3_constants import (
     NEMOV3_POSITION_JOINT_NAMES,
     NEMOV3_WHEEL_JOINT_NAMES,
 )
+from booster_mjlab.tasks.velocity.mdp.action_gain import RandomGainJointVelocityActionCfg
 from booster_mjlab.tasks.velocity.mdp.motor_dynamics import (
     MotorDynamicsJointPositionActionCfg,
     MotorDynamicsJointVelocityActionCfg,
@@ -306,11 +307,21 @@ def nemov3_flat_env_cfg(
     motor_dynamics: MotorTargetDynamicsCfg | None = None,
     trunk_mass_com: bool | str = False,
     backward: float = 0.0,
+    wheel_gain: float = 0.0,
+    wheel_armature: tuple[float, float] | None = None,
 ) -> ManagerBasedRlEnvCfg:
     """Create Nemov3 flat-terrain velocity tracking configuration.
 
     With ``backward=V`` (> 0) the forward command is sampled from [-V, 1.3] m/s instead of [0, 1.3] (Exp 90: Exp 83/85/88
     never saw a negative command and spread the legs to 40+ cm when driven backward). No extra reward.
+
+    With ``wheel_gain=G`` (> 0) every environment draws a wheel-action gain uniformly in [1-G, 1+G] at each reset (Exp 91:
+    the Exp 90 policy rocks at ~5.8 Hz when standing on the hardware and is stable only for a x0.7..x1.2 wheel gain in
+    simulation). Off in play, so the evaluation tools see the nominal gain.
+
+    With ``wheel_armature=(lo, hi)`` both wheel joints get one armature per environment drawn uniformly in [lo, hi] at every
+    reset (the XML default is 0.01; Exp 93c: armature 0 reproduces the ~5.9 Hz standing oscillation in simulation, with kd
+    unchanged). Off in play.
 
     With ``turn=True`` the yaw-rate command is sampled from [-TURN_YAW_RATE_MAX, TURN_YAW_RATE_MAX] rad/s (left
     and right turns) instead of being pinned to 0.
@@ -438,6 +449,11 @@ def nemov3_flat_env_cfg(
     if motor_dynamics is not None:
         pos_action_cls, vel_action_cls = MotorDynamicsJointPositionActionCfg, MotorDynamicsJointVelocityActionCfg
         motor = {"motor_dynamics": motor_dynamics}
+    wheel_motor = motor
+    if wheel_gain:
+        assert motor_dynamics is None, "wheel_gain is not combined with motor_dynamics"
+        vel_action_cls = RandomGainJointVelocityActionCfg
+        wheel_motor = {"gain_range": (1.0, 1.0) if play else (1.0 - wheel_gain, 1.0 + wheel_gain)}
     cfg.actions["joint_pos"] = pos_action_cls(
         entity_name="robot",
         actuator_names=position_joints,
@@ -451,8 +467,20 @@ def nemov3_flat_env_cfg(
         actuator_names=NEMOV3_WHEEL_JOINT_NAMES,
         scale=NEMOV3_WHEEL_ACTION_SCALE,
         use_default_offset=True,
-        **motor,
+        **wheel_motor,
     )
+
+    if wheel_armature is not None and not play:
+        cfg.events["wheel_armature"] = EventTermCfg(
+            func=mdp.dr.joint_armature,
+            mode="reset",
+            params={
+                "asset_cfg": SceneEntityCfg("robot", joint_names=NEMOV3_WHEEL_JOINT_NAMES),
+                "ranges": tuple(wheel_armature),
+                "operation": "abs",
+                "shared_random": True,  # one armature for both wheels
+            },
+        )
 
     cfg.viewer.body_name = TRUNK_BODY
 
