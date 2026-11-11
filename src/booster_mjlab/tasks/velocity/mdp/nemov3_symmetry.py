@@ -16,6 +16,8 @@ simulator in tools/nemov3_tools/symmetry_check.py):
   * gait clock (sin, cos) -> (-sin, -cos): the mirror of "right leg at phase p" is "left leg at p + pi".
 Requires a mirror-symmetric default pose and action scale (joint_pos is observed relative to the default
 and actions are offsets from it).
+
+Other robots reuse this with their own joint mirror table through ``maps_fn`` (see ``pinov1_symmetry.py``).
 """
 
 from __future__ import annotations
@@ -63,11 +65,11 @@ def _obs_joint_names(env, group: str, name: str) -> list[str]:
     return list(robot.joint_names) if isinstance(ids, slice) else [robot.joint_names[i] for i in ids]
 
 
-def _term_map(env, group: str, name: str, dim: int) -> tuple[list[int], list[float]]:
+def _term_map(env, group: str, name: str, dim: int, maps_fn=nemov3_mirror_maps) -> tuple[list[int], list[float]]:
     if name in _JOINT_TERMS or name == "actions":
         joints = _obs_joint_names(env, group, name) if name in _JOINT_TERMS else _action_joint_names(env)
         if len(joints) == dim:
-            return nemov3_mirror_maps(joints)
+            return maps_fn(joints)
     if name in _VECTOR_TERMS and dim == len(_VECTOR_TERMS[name]):
         return list(range(dim)), list(_VECTOR_TERMS[name])
     if name == "foot_contact" and dim == 2:  # (right, left)
@@ -77,15 +79,15 @@ def _term_map(env, group: str, name: str, dim: int) -> tuple[list[int], list[flo
     raise ValueError(f"No mirror rule for observation term '{name}' with dim {dim}")
 
 
-def _group_map(env, group: str) -> tuple[torch.Tensor, torch.Tensor]:
+def _group_map(env, group: str, maps_fn=nemov3_mirror_maps) -> tuple[torch.Tensor, torch.Tensor]:
     manager = getattr(env, "unwrapped", env).observation_manager
     names = manager._group_obs_term_names[group]
     dims = [int(torch.tensor(d).prod()) for d in manager._group_obs_term_dim[group]]
-    key = (group, tuple(names), tuple(dims))
+    key = (maps_fn, group, tuple(names), tuple(dims))
     if key not in _cache:
         perm, sign, offset = [], [], 0
         for name, dim in zip(names, dims):
-            p, s = _term_map(env, group, name, dim)
+            p, s = _term_map(env, group, name, dim, maps_fn)
             perm += [offset + i for i in p]
             sign += s
             offset += dim
@@ -97,26 +99,26 @@ def _flip(x: torch.Tensor, perm: torch.Tensor, sign: torch.Tensor) -> torch.Tens
     return x[:, perm.to(x.device)] * sign.to(x.device, x.dtype)
 
 
-def mirror_obs(env, group: str, x: torch.Tensor) -> torch.Tensor:
-    perm, sign = _group_map(env, group)
+def mirror_obs(env, group: str, x: torch.Tensor, maps_fn=nemov3_mirror_maps) -> torch.Tensor:
+    perm, sign = _group_map(env, group, maps_fn)
     return _flip(x, perm, sign)
 
 
-def mirror_actions(actions: torch.Tensor, env=None) -> torch.Tensor:
-    """Mirror an action batch; with ``env`` in its action layout, otherwise the full 32-joint layout."""
-    perm, sign = nemov3_mirror_maps(_action_joint_names(env) if env is not None else _ACTION_JOINT_NAMES)
+def mirror_actions(actions: torch.Tensor, env=None, maps_fn=nemov3_mirror_maps) -> torch.Tensor:
+    """Mirror an action batch; with ``env`` in its action layout, otherwise the full 32-joint nemov3 layout."""
+    perm, sign = maps_fn(_action_joint_names(env) if env is not None else _ACTION_JOINT_NAMES)
     return _flip(actions, torch.tensor(perm), torch.tensor(sign))
 
 
-def augment_symmetries(env, obs: TensorDict | None, actions: torch.Tensor | None):
+def augment_symmetries(env, obs: TensorDict | None, actions: torch.Tensor | None, maps_fn=nemov3_mirror_maps):
     """Return (obs, actions) with the mirrored copy appended (batch size doubled)."""
     if obs is not None:
         n = obs.batch_size[0]
         groups = {
-            g: torch.cat([obs[g], mirror_obs(env, g, obs[g]) if g in _POLICY_GROUPS else obs[g]], dim=0)
+            g: torch.cat([obs[g], mirror_obs(env, g, obs[g], maps_fn) if g in _POLICY_GROUPS else obs[g]], dim=0)
             for g in obs.keys()
         }
         obs = TensorDict(groups, batch_size=(2 * n,))
     if actions is not None:
-        actions = torch.cat([actions, mirror_actions(actions, env)], dim=0)
+        actions = torch.cat([actions, mirror_actions(actions, env, maps_fn)], dim=0)
     return obs, actions

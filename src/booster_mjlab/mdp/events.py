@@ -52,6 +52,7 @@ class reset_from_pose_pool:
         )
         self._min_foot_height: float = params.get("min_foot_height", -0.005)
         self._z_lift_factor: float = params.get("z_lift_factor", 0.0)
+        self._default_pose_fraction: float = params.get("default_pose_fraction", 0.0)
 
         # Motion dataset params (optional).
         self._dataset_root: str | None = params.get("dataset_root")
@@ -325,6 +326,17 @@ class reset_from_pose_pool:
         root_vel = sampled[:, 7 + nj : 7 + nj + 6]
         joint_vel = sampled[:, 7 + nj + 6 : 7 + nj + 6 + nj]
 
+        if self._default_pose_fraction > 0.0:
+            # A share of the resets starts at rest in the default pose instead (a robot commanded to stand otherwise
+            # starts from a reference frame at ~1 m/s and has to brake first).
+            at_rest = torch.rand(num_reset, device=self._device) < self._default_pose_fraction
+            default_root = asset.data.default_root_state[env_ids]
+            root_pos_rel = torch.where(at_rest[:, None], default_root[:, 0:3], root_pos_rel)
+            root_quat = torch.where(at_rest[:, None], default_root[:, 3:7], root_quat)
+            joint_pos = torch.where(at_rest[:, None], asset.data.default_joint_pos[env_ids], joint_pos)
+            root_vel = torch.where(at_rest[:, None], torch.zeros_like(root_vel), root_vel)
+            joint_vel = torch.where(at_rest[:, None], torch.zeros_like(joint_vel), joint_vel)
+
         positions = root_pos_rel + env.scene.env_origins[env_ids]
 
         asset.write_root_link_pose_to_sim(
@@ -332,3 +344,33 @@ class reset_from_pose_pool:
         )
         asset.write_root_link_velocity_to_sim(root_vel, env_ids=env_ids)
         asset.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
+
+
+from mjlab.managers.event_manager import requires_model_fields  # noqa: E402
+
+
+@requires_model_fields("actuator_gainprm", "actuator_biasprm")
+def velocity_gain_scale(
+    env,
+    env_ids: torch.Tensor | None,
+    kd_range: tuple[float, float],
+    asset_cfg: SceneEntityCfg,
+) -> None:
+    """Scale the gain of ``<velocity>`` actuators (force = kv * (target - qdot): gainprm[0] = kv, biasprm[2] = -kv) by a
+    uniform factor per env and actuator. mjlab's dr.pd_gains handles only position-mode XML actuators (Pino v1 Exp 34:
+    rear-wheel kv randomized like the joints' kd)."""
+    asset = env.scene[asset_cfg.name]
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.int)
+    else:
+        env_ids = env_ids.to(env.device, dtype=torch.int)
+    ids = asset_cfg.actuator_ids
+    actuators = [asset.actuators[i] for i in ids] if isinstance(ids, list) else list(asset.actuators[ids]) if isinstance(ids, slice) else [asset.actuators[ids]]
+    default_gainprm = env.sim.get_default_field("actuator_gainprm")
+    default_biasprm = env.sim.get_default_field("actuator_biasprm")
+    for actuator in actuators:
+        ctrl_ids = actuator.global_ctrl_ids
+        k = torch.empty((len(env_ids), len(ctrl_ids)), device=env.device).uniform_(*kd_range)
+        env.sim.model.actuator_gainprm[env_ids[:, None], ctrl_ids, 0] = default_gainprm[ctrl_ids, 0] * k
+        env.sim.model.actuator_biasprm[env_ids[:, None], ctrl_ids, 2] = default_biasprm[ctrl_ids, 2] * k
+

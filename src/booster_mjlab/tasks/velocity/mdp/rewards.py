@@ -74,6 +74,74 @@ def standing_pose_deviation_l1(
     return deviation * standing_scale
 
 
+def standing_joint_vel_l2(
+    env: "ManagerBasedRlEnv",
+    command_name: str,
+    command_threshold: float = 0.05,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Mean squared joint velocity, active only when commanded to stand (keeps a standing robot from stepping in place;
+    standing_pose_deviation_l1 only holds the pose, not the stillness)."""
+    asset: Entity = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    assert command is not None, f"Command '{command_name}' not found."
+    total_speed = torch.norm(command[:, :2], dim=1) + torch.abs(command[:, 2])
+    standing_scale = 1.0 - (total_speed / command_threshold).clamp(max=1.0)
+    return torch.mean(torch.square(asset.data.joint_vel[:, asset_cfg.joint_ids]), dim=1) * standing_scale
+
+
+def standing_base_vel_l2(
+    env: "ManagerBasedRlEnv",
+    command_name: str,
+    command_threshold: float = 0.05,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Squared base velocity (body-frame x / y + yaw rate), active only when commanded to stand. The velocity tracking
+    reward is flat once a standing robot is > ~0.3 m/s off (std_at_rest 0.1 m/s), so one that rolls away gets no
+    gradient to stop."""
+    asset: Entity = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    assert command is not None, f"Command '{command_name}' not found."
+    total_speed = torch.norm(command[:, :2], dim=1) + torch.abs(command[:, 2])
+    standing_scale = 1.0 - (total_speed / command_threshold).clamp(max=1.0)
+    lin = torch.sum(torch.square(asset.data.root_link_lin_vel_b[:, :2]), dim=1)
+    yaw = torch.square(asset.data.root_link_ang_vel_b[:, 2])
+    return (lin + yaw) * standing_scale
+
+
+def joint_target_limit_excess(env: "ManagerBasedRlEnv", action_name: str = "joint_pos") -> torch.Tensor:
+    """Sum of squared amounts by which the position targets of an action term lie outside the joints' soft limits.
+    Penalizing the actual angle cannot stop a policy that leans on a mechanical stop (the angle saturates at the hard
+    limit while the target -- and the torque -- keeps growing): Pino v1 Exp 18 held both hip rolls at their inner stops
+    with targets 0.3 rad past them and 12-15 Nm."""
+    term = env.action_manager.get_term(action_name)
+    asset: Entity = env.scene[term.cfg.entity_name]
+    limits = asset.data.soft_joint_pos_limits[:, term.target_ids]
+    target = term._processed_actions
+    excess = (target - limits[..., 1]).clamp_min(0.0) + (limits[..., 0] - target).clamp_min(0.0)
+    return torch.sum(torch.square(excess), dim=1)
+
+
+def standing_joint_deviation_excess(
+    env: "ManagerBasedRlEnv",
+    command_name: str,
+    tolerance: float,
+    command_threshold: float = 0.05,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Sum of squared deviations from the default pose beyond ``tolerance`` [rad], only while commanded to stand.
+    Per joint, so one joint far off counts (standing_pose_deviation_l1 averages over all joints): Pino v1 Exp 20 stood
+    with its hip yaws spread +-0.4-0.5 rad around the default."""
+    asset: Entity = env.scene[asset_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    assert command is not None, f"Command '{command_name}' not found."
+    total_speed = torch.norm(command[:, :2], dim=1) + torch.abs(command[:, 2])
+    standing_scale = 1.0 - (total_speed / command_threshold).clamp(max=1.0)
+    deviation = asset.data.joint_pos[:, asset_cfg.joint_ids] - asset.data.default_joint_pos[:, asset_cfg.joint_ids]
+    excess = (deviation.abs() - tolerance).clamp_min(0.0)
+    return torch.sum(torch.square(excess), dim=1) * standing_scale
+
+
 def variable_upright(
     env: "ManagerBasedRlEnv",
     command_name: str,

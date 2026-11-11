@@ -32,9 +32,12 @@ def _speed_ramp(
     return ((speed - lo) / max(hi - lo, 1e-6)).clamp(0.0, 1.0)
 
 
-def _wheel_height(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg, radius: float):
+def _wheel_height(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg, radius: float | tuple[float, ...]):
+    """Bottom height of each wheel; ``radius`` is one value or one per body (asset_cfg order, e.g. pinov1's rear /
+    front wheels)."""
     robot = env.scene[asset_cfg.name]
-    return (robot.data.body_link_pos_w[:, asset_cfg.body_ids, 2] - radius).clamp_min(0.0)
+    z = robot.data.body_link_pos_w[:, asset_cfg.body_ids, 2]
+    return (z - torch.as_tensor(radius, device=z.device, dtype=z.dtype)).clamp_min(0.0)
 
 
 def wheel_air_time(
@@ -297,11 +300,32 @@ def gated_lift_features_from_motion(data) -> torch.Tensor:
 
 
 def wheel_height_excess(
-    env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg, limit: float, scale: float, wheel_radius: float = 0.075
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg,
+    limit: float,
+    scale: float,
+    wheel_radius: float | tuple[float, ...] = 0.075,
 ) -> torch.Tensor:
     """Safety bound on lift height: ``sum(max(h - limit, 0)) / scale`` over the wheels (0 below ``limit``)."""
     h = _wheel_height(env, asset_cfg, wheel_radius)
     return torch.sum((h - limit).clamp_min(0.0), dim=1) / scale
+
+
+def standing_wheel_height_excess(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    asset_cfg: SceneEntityCfg,
+    limit: float,
+    scale: float,
+    wheel_radius: float | tuple[float, ...] = 0.075,
+    command_threshold: float = 0.05,
+) -> torch.Tensor:
+    """``wheel_height_excess`` only while commanded to stand: every wheel on the ground. Pino v1 Exp 13 stood on one
+    raised heel, i.e. on the passive front wheel of that foot, which cannot brake -- it rolled away at ~0.4 m/s."""
+    command = env.command_manager.get_command(command_name)
+    speed = torch.norm(command[:, :2], dim=1) + torch.abs(command[:, 2])
+    standing = 1.0 - (speed / command_threshold).clamp(max=1.0)
+    return wheel_height_excess(env, asset_cfg, limit, scale, wheel_radius) * standing
 
 
 def wheel_jump(
