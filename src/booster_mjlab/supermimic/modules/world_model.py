@@ -11,11 +11,11 @@ from booster_mjlab.supermimic.utils.rotations import so3_exp, so3_log, yaw_mat
 
 
 class WorldModel(nn.Module):
-    def __init__(self, num_joints: int, xi_dim: int, pos_mask: torch.Tensor, hidden=(2048, 2048, 2048)):
+    def __init__(self, num_joints: int, xi_dim: int, pos_mask: torch.Tensor, action_hist: int = 0, hidden=(2048, 2048, 2048)):
         super().__init__()
         self.num_joints = num_joints
         self.out_dim = 12 + 2 * num_joints
-        self.in_dim = invariant_dim(num_joints) + num_joints + xi_dim
+        self.in_dim = invariant_dim(num_joints) + num_joints * (1 + action_hist) + xi_dim
         self.net = mlp(self.in_dim, list(hidden), self.out_dim, act=nn.SiLU, layer_norm=True)
         nn.init.zeros_(self.net[-1].weight)
         nn.init.zeros_(self.net[-1].bias)
@@ -23,8 +23,9 @@ class WorldModel(nn.Module):
         self.out_norm = RunningNorm(self.out_dim, eps=1e-4)
         self.register_buffer("pos_mask", pos_mask.float().clone())
 
-    def inputs(self, S, a, xi_n):
-        return torch.cat((invariant_features(S, self.pos_mask), a, xi_n), -1)
+    def inputs(self, S, a, xi_n, a_hist):
+        """a_hist: (..., num_joints * action_hist) previous actions, newest first (empty without action history)."""
+        return torch.cat((invariant_features(S, self.pos_mask), a, a_hist, xi_n), -1)
 
     @staticmethod
     def targets(S, S1):
@@ -45,9 +46,9 @@ class WorldModel(nn.Module):
             -1,
         )
 
-    def step(self, S, a, xi_n):
+    def step(self, S, a, xi_n, a_hist):
         p, R, v, w, q, qd = S
-        y = run_mlp(self.net, self.in_norm(self.inputs(S, a, xi_n)))
+        y = run_mlp(self.net, self.in_norm(self.inputs(S, a, xi_n, a_hist)))
         d = y * self.out_norm.std() + self.out_norm.mean
         H = yaw_mat(R)
         J = self.num_joints

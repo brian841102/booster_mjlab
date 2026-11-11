@@ -8,7 +8,7 @@ from booster_mjlab.supermimic.state import state_dim
 
 
 class ReplayBuffer:
-    def __init__(self, T: int, N: int, num_joints: int, xi_dim: int, device: str):
+    def __init__(self, T: int, N: int, num_joints: int, xi_dim: int, device: str, action_hist: int = 0):
         self.T, self.N, self.device = T, N, device
         fields = {
             "s": (state_dim(num_joints), torch.float32),
@@ -20,6 +20,8 @@ class ReplayBuffer:
             "f": ((), torch.long),
             "ep_step": ((), torch.int32),
             "done": ((), torch.bool),
+            "cut": ((), torch.bool),  # the env was pushed after this transition: the next one does not continue it
+            "a_hist": (num_joints * action_hist, torch.float32),  # a_{t-1}, ..., a_{t-H} before this transition
         }
         self.data = {}
         for k, (shape, dt) in fields.items():
@@ -45,8 +47,9 @@ class ReplayBuffer:
         rows = self._row(ages)
         e = env.unsqueeze(-1).expand_as(rows)
         out = {key: self.data[key][rows, e] for key in ("s", "s1", "a", "xi", "done")}
-        # transition j is valid if no episode ended at transitions 0..j-1
-        d = out["done"].float()
+        out["a_hist"] = self.data["a_hist"][rows[:, 0], env]  # before the window's first transition
+        # transition j is valid if no episode ended (or push happened) at transitions 0..j-1
+        d = (out["done"] | self.data["cut"][rows, e]).float()
         mask = torch.cumprod(torch.cat((torch.ones(B, 1, device=self.device), 1 - d[:, :-1]), -1), -1)
         out["mask"] = mask
         return out
@@ -62,6 +65,6 @@ class ReplayBuffer:
         back = torch.minimum(back, age.unsqueeze(-1))  # stay inside the buffer
         hrows = self._row(age.unsqueeze(-1) - back)
         henv = env.unsqueeze(-1).expand_as(hrows)
-        start = {k: self.data[k][row, env] for k in ("s", "a_prev", "xi", "f")}
+        start = {k: self.data[k][row, env] for k in ("s", "a_prev", "xi", "f", "a_hist")}
         hist_d = {k: self.data[k][hrows, henv] for k in ("s", "a_prev", "xi", "f")}
         return start, hist_d

@@ -19,7 +19,7 @@ from booster_mjlab.supermimic.modules import Critic, Policy, WorldModel
 from booster_mjlab.supermimic.state import invariant_dim, unflatten_state
 from booster_mjlab.supermimic.storage import ReplayBuffer
 from booster_mjlab.tasks.supermimic.mdp import goal_frame_dim
-from booster_mjlab.tasks.supermimic.supermimic_env import SuperMimicEnv
+from booster_mjlab.tasks.supermimic.supermimic_env import SuperMimicEnv, roll_action_hist
 
 LOG_COLUMNS = (
     "iteration,wall_h,sim_steps,wm_loss,wm_err8,pi_loss,v_loss,imag_rew,pi_gradnorm,imag_survival,sim_rew,ep_len,ep_ret_norm,"
@@ -31,7 +31,7 @@ def build_networks(sim: SuperMimicEnv, cfg: dict, device: str):
     """World model, policy and critic for ``sim``'s robot and the runner settings ``cfg``."""
     mdp, J = sim.mdp, sim.num_joints
     goal_dim = goal_frame_dim(J) * cfg["goal_frames"]
-    wm = WorldModel(J, mdp.xi_dim, sim.pos).to(device)
+    wm = WorldModel(J, mdp.xi_dim, sim.pos, action_hist=cfg.get("wm_action_hist", 0)).to(device)
     pi = Policy(mdp.obs_dim, goal_dim, J, hist=cfg["hist"]).to(device)
     critic = Critic(invariant_dim(J) + mdp.critic_extra + goal_dim).to(device)
     return wm, pi, critic
@@ -50,13 +50,13 @@ class SuperMimicRunner:
         common.AMP_DTYPE = torch.bfloat16 if c["amp_dtype"] == "bf16" else None
 
         self.env = env
-        self.sim = sim = SuperMimicEnv(env.unwrapped, gamma=c["gamma"])
+        self.sim = sim = SuperMimicEnv(env.unwrapped, gamma=c["gamma"], action_hist=c["wm_action_hist"])
         self.mdp, self.motion = sim.mdp, sim.motion
         self.wm, self.pi, self.critic = build_networks(sim, c, dev)
         self.opt_wm = torch.optim.Adam(self.wm.parameters(), lr=c["lr"])
         self.opt_pi = torch.optim.Adam(self.pi.parameters(), lr=c["lr"], betas=(0.9, 0.95))
         self.opt_v = torch.optim.Adam(self.critic.parameters(), lr=c["lr"])
-        self.buffer = ReplayBuffer(c["buffer_steps"], sim.N, sim.num_joints, self.mdp.xi_dim, dev)
+        self.buffer = ReplayBuffer(c["buffer_steps"], sim.N, sim.num_joints, self.mdp.xi_dim, dev, c["wm_action_hist"])
         self.obs_hist = torch.zeros(sim.N, c["hist"], self.mdp.obs_dim, device=dev)
         self.current_learning_iteration, self.wall_offset, self.sim_steps = 0, 0.0, 0
         J = sim.num_joints
@@ -77,12 +77,13 @@ class SuperMimicRunner:
                 os.symlink(os.path.basename(log_dir), latest)
 
     # ------------------------------------------------------------------ compiled pieces
-    def _wm_rollout(self, s, a, xi):
+    def _wm_rollout(self, s, a, xi, ah):
         J = self.sim.num_joints
         S = unflatten_state(s[:, 0], J)
         preds = []
         for j in range(self.cfg["wm_window"]):
-            S = self.wm.step(S, a[:, j], self.mdp.normalize_xi(xi[:, j]))
+            S = self.wm.step(S, a[:, j], self.mdp.normalize_xi(xi[:, j]), ah)
+            ah = roll_action_hist(ah, a[:, j])
             preds.append(S)
         return tuple(torch.stack([P[i] for P in preds], 1) for i in range(6))  # (B, k, ...)
 
@@ -92,13 +93,13 @@ class SuperMimicRunner:
         e = e.mean(-1)
         return (e * mask).sum() / s1.shape[0], e[:, -1]
 
-    def _imag_step(self, S, o_hist, a_prev, f, xi, xi_n, g):
+    def _imag_step(self, S, o_hist, a_prev, f, xi, xi_n, g, ah):
         a = self.pi(o_hist, g)
-        S1 = self.wm.step(S, a, xi_n)
+        S1 = self.wm.step(S, a, xi_n, ah)
         f1 = f + 1
         o1 = self.mdp.add_noise(self.mdp.obs(S1, a, xi, f1))
         o_hist = torch.cat((o_hist[:, 1:], o1.unsqueeze(1)), 1)
-        return S1, a, o_hist, f1, self.motion.goal(f1, self.cfg["goal_frames"])
+        return S1, a, o_hist, f1, self.motion.goal(f1, self.cfg["goal_frames"]), roll_action_hist(ah, a)
 
     def _reward_term(self, S, f, a, a_prev):
         return self.mdp.reward(S, f, a, a_prev), self.mdp.soft_termination(S, f)
@@ -116,7 +117,7 @@ class SuperMimicRunner:
     def wm_update(self):
         c = self.cfg
         w = self.buffer.sample_windows(c["wm_batch"], c["wm_window"])
-        S_hat = self.wm_rollout(w["s"], w["a"], w["xi"])
+        S_hat = self.wm_rollout(w["s"], w["a"], w["xi"], w["a_hist"])
         loss, e_last = self.wm_err(S_hat, w["s1"], w["mask"])
         self.opt_wm.zero_grad(set_to_none=True)
         loss.backward()
@@ -142,7 +143,7 @@ class SuperMimicRunner:
         J, K, HZ, B = self.sim.num_joints, c["goal_frames"], c["horizon"], c["pi_batch"]
         s, h = self.sample_valid_starts(B)
         S = unflatten_state(s["s"], J)
-        xi, f, a_prev = s["xi"], s["f"], s["a_prev"]
+        xi, f, a_prev, ah = s["xi"], s["f"], s["a_prev"], s["a_hist"]
         xi_n = mdp.normalize_xi(xi)
         with torch.no_grad():
             o_hist = mdp.obs(unflatten_state(h["s"], J), h["a_prev"], h["xi"], h["f"])
@@ -155,7 +156,7 @@ class SuperMimicRunner:
         Ss, As, Aps, Fs, Gs = [], [], [], [], []
         for _ in range(HZ):
             Aps.append(a_prev)
-            S, a_prev, o_hist, f, g = self.imag_step(S, o_hist, a_prev, f, xi, xi_n, g)
+            S, a_prev, o_hist, f, g, ah = self.imag_step(S, o_hist, a_prev, f, xi, xi_n, g, ah)
             Ss.append(S), As.append(a_prev), Fs.append(f), Gs.append(g)
         flat = lambda xs: torch.stack(xs).flatten(0, 1)  # noqa: E731  (H*B, ...)
         S_all = tuple(flat([St[i] for St in Ss]) for i in range(6))
@@ -230,7 +231,7 @@ class SuperMimicRunner:
             self.buffer.add(out)
             J = sim.num_joints
             S0, S1 = unflatten_state(out["s"], J), unflatten_state(out["s1"], J)
-            self.wm.in_norm.update(self.wm.inputs(S0, out["a"], mdp.normalize_xi(out["xi"])))
+            self.wm.in_norm.update(self.wm.inputs(S0, out["a"], mdp.normalize_xi(out["xi"]), out["a_hist"]))
             self.wm.out_norm.update(self.wm.targets(S0, S1))
             self.sim_steps += sim.N
             stats["r"].append(out["r"].mean() / 0.1)
@@ -391,8 +392,11 @@ class SuperMimicPlayPolicy:
             self.hist = o.unsqueeze(1).repeat(1, self.cfg["hist"], 1)
         self.hist = torch.where(fresh, o.unsqueeze(1).expand_as(self.hist), torch.cat((self.hist[:, 1:], o.unsqueeze(1)), 1))
         a = self.pi(self.hist, motion.goal(sim.f, K))
-        sim.a_prev = a.clone()
+        sim.a_prev = a.clone()  # the raw action, as the hardware observes it
         sim.ep_step = sim.ep_step + 1
+        if sim.wheel_limit:  # the wheel speed target clamp of SuperMimicEnv.step, in action units
+            lim = sim.wheel_limit / sim.alpha
+            a = torch.where(sim.vel, a.clamp(-lim, lim), a)
         return a[:, self.order]
 
 

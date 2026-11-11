@@ -57,5 +57,9 @@ class SuperMimicRunnerCfg(RslRlBaseRunnerCfg):
     """Simulator steps before any update."""
     wm_only_iters: int = 500
     """World-model-only iterations at the start."""
+    wm_action_hist: int = 0
+    """Previous actions (a_{t-1}, ..., a_{t-H}) the world model also sees. With actuator delays the executed command
+    is an older action still in the delay buffer; without them the world model cannot know it (exp2 / 排查 1 in
+    tools/nemov3_finetune_supermimic.md). Not in the paper."""
     amp_dtype: Literal["bf16", "none"] = "bf16"
     """Autocast dtype for the MLP matmuls."""
