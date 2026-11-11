@@ -113,7 +113,8 @@ MotionAugmentationSpec = str | Mapping[str, Any] | MotionAugmentation
 class MirrorAugmentation:
     name: str = "mirror"
     robot: str = "k1"
-    """Joint layout of the clips: "k1" (22 DOF, default) or "nemov3" (32 DOF, NEMOV3_JOINT_ORDER)."""
+    """Joint layout of the clips: "k1" (22 DOF, default), "nemov3" (32 DOF, NEMOV3_JOINT_ORDER) or "pinov1" (25 DOF,
+    PINOV1_JOINT_ORDER)."""
 
     def _maps(self) -> tuple[Any, Any]:
         if self.robot == "k1":
@@ -125,6 +126,11 @@ class MirrorAugmentation:
             )
 
             index_map, sign_map = nemov3_mirror_maps(NEMOV3_JOINT_ORDER)
+            return np.array(index_map), np.array(sign_map, dtype=np.float32)
+        if self.robot == "pinov1":
+            from booster_mjlab.robots.pinov1.pinov1_constants import PINOV1_JOINT_ORDER, pinov1_mirror_maps
+
+            index_map, sign_map = pinov1_mirror_maps(PINOV1_JOINT_ORDER)
             return np.array(index_map), np.array(sign_map, dtype=np.float32)
         raise ValueError(f"Unknown mirror robot layout '{self.robot}'.")
 

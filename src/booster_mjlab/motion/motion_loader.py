@@ -178,6 +178,8 @@ class MotionLoader:
                     speed_factor=self.speed_factor,
                     device=self.device,
                 )
+                if isinstance(motion_file, Path):
+                    data.clip_name = motion_file.stem
 
                 self.motion_data.append(data)
                 self.motion_weights.append(weight)
@@ -342,6 +344,44 @@ class MotionLoader:
         for i in range(num_mini_batch):
             batch_idx = indices[i * mini_batch_size : (i + 1) * mini_batch_size]
             yield self.all_obs[batch_idx]
+
+    def feed_forward_generator_soft_condition(
+        self,
+        num_mini_batch: int,
+        mini_batch_size: int,
+        conditions: torch.Tensor,
+        num_amp_obs_steps: int,
+    ) -> Generator[torch.Tensor, None, None]:
+        """Expert histories for a speed-conditioned discriminator with a continuous condition (arXiv 2605.18611,
+        Sec. III-D: "a reference transition is sampled from the walk clip with probability (1 - v) and from the run
+        clip with probability v").
+
+        The last feature of every frame must be a per-clip label in {0, 1} (``extra_obs_fn``). Each sample takes a
+        condition c from ``conditions`` (the policy samples' own values, so the discriminator cannot tell real from
+        fake by the condition alone), is drawn from the label-1 clips with probability c and from the label-0 clips
+        otherwise (per-frame weights within each group as usual), and gets c written into the last feature of all
+        its frames.
+        """
+        total = num_mini_batch * mini_batch_size
+        if total <= 0:
+            return
+        label = self.all_obs[:, -1]
+        fast_w = self.per_frame_weights * (label > 0.5)
+        slow_w = self.per_frame_weights * (label <= 0.5)
+        assert fast_w.sum() > 0 and slow_w.sum() > 0, "soft condition needs clips labelled 0 and 1"
+        c = conditions[torch.randint(conditions.numel(), (total,), device=conditions.device)].to(self.device)
+        c = c.clamp(0.0, 1.0)
+        fast = torch.rand(total, device=self.device) < c
+        indices = torch.empty(total, dtype=torch.long, device=self.device)
+        n_fast = int(fast.sum())
+        if n_fast:
+            indices[fast] = torch.multinomial(fast_w, n_fast, replacement=True)
+        if total - n_fast:
+            indices[~fast] = torch.multinomial(slow_w, total - n_fast, replacement=True)
+        obs = self.all_obs[indices].clone()
+        obs.view(total, num_amp_obs_steps, -1)[:, :, -1] = c[:, None]
+        for i in range(num_mini_batch):
+            yield obs[i * mini_batch_size : (i + 1) * mini_batch_size]
 
     def get_state_for_reset(self, number_of_samples: int) -> Tuple[torch.Tensor, ...]:
         idx = torch.multinomial(

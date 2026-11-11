@@ -352,6 +352,9 @@ class MotionData:
     # ``local_body_pos``.
     local_body_pos: Optional[torch.Tensor] = None
     link_body_list: Optional[List[str]] = None
+    # Stem of the source clip file (e.g. "skatingfast06"), set by the motion loader for every variant of the clip, so
+    # per-clip expert features (``extra_obs_fn``) can tell the clips apart.
+    clip_name: Optional[str] = None
 
     @property
     def num_frames(self) -> int:
@@ -386,6 +389,7 @@ class MotionData:
                 else None
             ),
             link_body_list=self.link_body_list,
+            clip_name=self.clip_name,
         )
 
     def get_obs(self, indices: torch.Tensor) -> torch.Tensor:
