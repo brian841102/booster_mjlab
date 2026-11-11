@@ -4,7 +4,8 @@ usage: record_video.py <task> <checkpoint.pt> <out.mp4> [segments=forward] [widt
 
 segments = a preset name (PRESETS below: forward, forward-turn, stand, forward-backward-turn) or
  comma-separated "forward speed m/s:seconds" (yaw rate 0) or "forward speed:yaw rate rad/s:seconds" (turning;
-the caption then shows commanded / actual yaw rate too). One robot, deterministic policy, pushes off,
+the caption then shows commanded / actual yaw rate too); a segment ending in "j" (e.g. "1.0:3j") presses the jump
+button at its start (jump tasks, mdp/jump.py; the caption then marks the jump window). One robot, deterministic policy, pushes off,
 tracking camera from the robot's left front. Every frame gets a caption: commanded / actual speed and each wheel's bottom
 height above the ground (so lifts are visible even in a small video). 25 fps real time (every 2nd 50 Hz step).
 """
@@ -34,6 +35,8 @@ PRESETS = {
     # Stand, forward, then backward to -0.5 m/s and the turning limits while reversing (+-1.3 rad/s, 5 s each), in place
     # +-1.3 rad/s (5 s each), stand (Exp 90+).
     "forward-backward-turn": "0:3,0.6:5,1.0:5,0:2,-0.3:5,-0.5:5,-0.5:1.3:5,-0.5:-1.3:5,0:1.3:5,0:-1.3:5,0:3",
+    # Jump button while skating at 0.6 / 1.0 / 1.3 m/s, twice per speed (task nemov3_velocity_amp_jump).
+    "jump": "0:2,0.6:3,0.6:3j,0.6:3j,1.0:3,1.0:3j,1.0:3j,1.3:3,1.3:3j,1.3:3j,0:3",
 }
 FONT = "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"
 R_WHEEL = 0.075
@@ -42,7 +45,9 @@ R_WHEEL = 0.075
 def main():
     task, ckpt, out = sys.argv[1], sys.argv[2], sys.argv[3]
     spec = sys.argv[4] if len(sys.argv) > 4 else "forward"
-    segs = [[float(v) for v in s.split(":")] for s in PRESETS.get(spec, spec).split(",")]
+    raw = PRESETS.get(spec, spec).split(",")
+    presses = [s.endswith("j") for s in raw]
+    segs = [[float(v) for v in s.rstrip("j").split(":")] for s in raw]
     segs = [(s[0], 0.0, s[1]) if len(s) == 2 else tuple(s) for s in segs]
     turning = any(wz for _, wz, _ in segs)
     width = int(sys.argv[5]) if len(sys.argv) > 5 else 854
@@ -66,6 +71,8 @@ def main():
     policy = runner.get_inference_policy(device="cuda:0")
     robot = env.scene["robot"]
     term = env.command_manager.get_term("twist")
+    jump = env.command_manager.get_term("jump") if "jump" in env.command_manager.active_terms else None
+    assert jump is not None or not any(presses), "segments press the jump button but the task has no jump command"
     ids = [robot.body_names.index("right_wheel_link"), robot.body_names.index("left_wheel_link")]
     font = ImageFont.truetype(FONT, max(14, height // 26))
     small = ImageFont.truetype(FONT, max(12, height // 32))
@@ -83,7 +90,10 @@ def main():
 
     with torch.inference_mode():
         obs, _ = venv.reset()
-        for vx, wz, seconds in segs:
+        for (vx, wz, seconds), press in zip(segs, presses):
+            if press:
+                jump.trigger()
+                obs = venv.get_observations()
             tw.ranges.lin_vel_x = (vx, vx)
             tw.ranges.ang_vel_z = (wz, wz)
             term._resample_command(all_ids)
@@ -107,6 +117,8 @@ def main():
                 y2 = 8 + font.size + 4
                 d.text((12, y2), f"右轮离地 {h[0]:4.1f} cm", font=small, fill=lift(h[0]))
                 d.text((12 + width // 4, y2), f"左轮离地 {h[1]:4.1f} cm", font=small, fill=lift(h[1]))
+                if jump is not None and bool(jump.active[0]):
+                    d.text((12 + 3 * width // 4, 6), "跳跃!", font=font, fill=(255, 80, 80))
                 if turning:
                     yaw = robot.data.root_link_ang_vel_w[0, 2].item()
                     d.text((12 + width // 2, y2), f"转弯 指令 {wz:+.1f} 实际 {yaw:+.2f} rad/s", font=small,
