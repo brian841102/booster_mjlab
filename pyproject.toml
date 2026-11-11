@@ -24,6 +24,7 @@ motions-to-hf = "booster_mjlab.scripts.motions_to_hf:main"
 export-web-demo = "booster_mjlab.scripts.export_web_demo:main"
 evaluate-supermimic = "booster_mjlab.scripts.evaluate_supermimic:main"
 replay-supermimic = "booster_mjlab.scripts.replay_supermimic:main"
+export-supermimic = "booster_mjlab.scripts.export_supermimic:main"
 
 [build-system]
 requires = ["uv_build>=0.9.5,<0.10.0"]
