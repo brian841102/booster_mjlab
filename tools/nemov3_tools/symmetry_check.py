@@ -5,7 +5,7 @@ returns the cached buffer), then write the mirrored state M(s) (mirrored root po
 mirrored command, clock phase + pi, mirrored last action) and recompute. The augmentation is correct iff
 mirror(obs(s)) == obs(M(s)) term by term. The robot is lifted off the ground so contact terms are zero in both,
 and the encoder-bias randomisation is removed.
-usage: TASK=<task> symmetry_check.py [n_states=8]
+usage: TASK=<task> symmetry_check.py [n_states=8]   (a Pino v1 task -- "Pinov1" in its id -- uses pinov1's tables)
 """
 
 import math
@@ -20,11 +20,18 @@ from mjlab.envs import ManagerBasedRlEnv
 from mjlab.tasks.registry import load_env_cfg
 
 import booster_mjlab.tasks.velocity.config.nemov3  # noqa: F401
-from booster_mjlab.robots.nemov3.nemov3_constants import nemov3_mirror_maps
-from booster_mjlab.tasks.velocity.mdp.nemov3_symmetry import mirror_actions, mirror_obs
+import booster_mjlab.tasks.velocity.config.pinov1  # noqa: F401
+
+TASK = os.environ.get("TASK", "Mjlab-Velocity-Flat-Amp-Clock-Arms-Booster-Nemov3")
+if "Pinov1" in TASK:
+    from booster_mjlab.robots.pinov1.pinov1_constants import pinov1_mirror_maps as mirror_maps
+    from booster_mjlab.tasks.velocity.mdp.pinov1_symmetry import mirror_actions, mirror_obs
+else:
+    from booster_mjlab.robots.nemov3.nemov3_constants import nemov3_mirror_maps as mirror_maps
+    from booster_mjlab.tasks.velocity.mdp.nemov3_symmetry import mirror_actions, mirror_obs
 
 n_states = int(sys.argv[1]) if len(sys.argv) > 1 else 8
-cfg = load_env_cfg(os.environ.get("TASK", "Mjlab-Velocity-Flat-Amp-Clock-Arms-Booster-Nemov3"), play=True)
+cfg = load_env_cfg(TASK, play=True)
 cfg.scene.num_envs = 1
 cfg.events.pop("encoder_bias", None)
 cfg.events.pop("push_robot", None)
@@ -37,7 +44,7 @@ clock = env.command_manager.get_term("gait_clock") if "gait_clock" in env.comman
 dev = "cuda:0"
 J = list(robot.joint_names)  # all 32 joints, or fewer with fixed_joints
 n_act = env.action_manager.total_action_dim
-jidx, jsign = nemov3_mirror_maps(J)
+jidx, jsign = mirror_maps(J)
 jidx, jsign = torch.tensor(jidx, device=dev), torch.tensor(jsign, device=dev)
 Mm = np.diag([1.0, -1.0, 1.0])
 rng = np.random.default_rng(0)

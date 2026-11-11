@@ -31,6 +31,7 @@ from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 
 import booster_mjlab.tasks.velocity.config.nemov3  # noqa: F401
+import booster_mjlab.tasks.velocity.config.pinov1  # noqa: F401  (pinov1: "calf" = knee)
 
 PAIRS = {
     "hip_pitch": ("right_hip_pitch_joint", "left_hip_pitch_joint"),
@@ -83,8 +84,11 @@ def main():
     robot = env.scene["robot"]
     term = env.command_manager.get_term("twist")
     dt = env.step_dt
-    idx_r = [robot.joint_names.index(v[0]) for v in PAIRS.values()]
-    idx_l = [robot.joint_names.index(v[1]) for v in PAIRS.values()]
+    pairs = dict(PAIRS)
+    if "Pinov1" in task:
+        pairs["calf"] = ("right_knee_joint", "left_knee_joint")  # the "calf" column is pinov1's knee
+    idx_r = [robot.joint_names.index(v[0]) for v in pairs.values()]
+    idx_l = [robot.joint_names.index(v[1]) for v in pairs.values()]
 
     res = {}
     for vx in vxs:

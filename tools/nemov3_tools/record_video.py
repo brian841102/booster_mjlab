@@ -8,6 +8,7 @@ the caption then shows commanded / actual yaw rate too); a segment ending in "j"
 button at its start (jump tasks, mdp/jump.py; the caption then marks the jump window). One robot, deterministic policy, pushes off,
 tracking camera from the robot's left front. Every frame gets a caption: commanded / actual speed and each wheel's bottom
 height above the ground (so lifts are visible even in a small video). 25 fps real time (every 2nd 50 Hz step).
+Pino v1 tasks ("Pinov1" in the id) caption all four wheels (rear / front of each foot).
 """
 
 import sys
@@ -23,6 +24,8 @@ from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 
 import booster_mjlab.tasks.velocity.config.nemov3  # noqa: F401
+import booster_mjlab.tasks.velocity.config.pinov1  # noqa: F401
+from booster_mjlab.robots.pinov1.pinov1_constants import PINOV1_WHEEL_BODY_RADII
 
 # Named command sequences ("speed:seconds" or "speed:yaw rate:seconds"; a segment is not preceded by a reset).
 PRESETS = {
@@ -40,6 +43,13 @@ PRESETS = {
 }
 FONT = "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc"
 R_WHEEL = 0.075
+# (caption label, wheel body, radius) per robot.
+NEMOV3_WHEELS = (("右轮离地", "right_wheel_link", R_WHEEL), ("左轮离地", "left_wheel_link", R_WHEEL))
+PINOV1_WHEELS = tuple(
+    (label, name, PINOV1_WHEEL_BODY_RADII[name])
+    for label, name in (("左后轮", "left_rear_wheel_link"), ("左前轮", "left_front_wheel_link"),
+                        ("右后轮", "right_rear_wheel_link"), ("右前轮", "right_front_wheel_link"))
+)
 
 
 def main():
@@ -57,7 +67,9 @@ def main():
     env_cfg = load_env_cfg(task, play=True)
     env_cfg.scene.num_envs = 1
     env_cfg.viewer.width, env_cfg.viewer.height = width, height
-    env_cfg.viewer.distance, env_cfg.viewer.elevation = 1.9, -10.0  # azimuth follows the heading (below)
+    pinov1 = "Pinov1" in task
+    # azimuth follows the heading (below); pinov1 is taller (~0.75 m)
+    env_cfg.viewer.distance, env_cfg.viewer.elevation = (2.1 if pinov1 else 1.9), -10.0
     tw = env_cfg.commands["twist"]
     tw.rel_standing_envs = tw.rel_forward_envs = 0.0
     tw.ranges.lin_vel_y = tw.ranges.ang_vel_z = (0.0, 0.0)
@@ -73,7 +85,9 @@ def main():
     term = env.command_manager.get_term("twist")
     jump = env.command_manager.get_term("jump") if "jump" in env.command_manager.active_terms else None
     assert jump is not None or not any(presses), "segments press the jump button but the task has no jump command"
-    ids = [robot.body_names.index("right_wheel_link"), robot.body_names.index("left_wheel_link")]
+    wheels = PINOV1_WHEELS if pinov1 else NEMOV3_WHEELS
+    ids = [robot.body_names.index(name) for _, name, _ in wheels]
+    radii = torch.tensor([r for *_, r in wheels], device="cuda:0")
     font = ImageFont.truetype(FONT, max(14, height // 26))
     small = ImageFont.truetype(FONT, max(12, height // 32))
 
@@ -109,19 +123,22 @@ def main():
                 cam.azimuth = cam_az
                 img = Image.fromarray(env.render())
                 d = ImageDraw.Draw(img)
-                h = (robot.data.body_link_pos_w[0, ids, 2] - R_WHEEL).clamp_min(0).cpu().numpy() * 100
+                h = (robot.data.body_link_pos_w[0, ids, 2] - radii).clamp_min(0).cpu().numpy() * 100
                 speed = robot.data.root_link_lin_vel_b[0, 0].item()
                 d.rectangle([0, 0, width, int(height * 0.19)], fill=(0, 0, 0))
                 d.text((12, 6), f"{title}  指令 {vx:.1f} m/s   实际 {speed:.2f} m/s", font=font, fill=(255, 255, 255))
                 lift = lambda cm: (255, 200, 0) if cm > 2 else (200, 200, 200)
                 y2 = 8 + font.size + 4
-                d.text((12, y2), f"右轮离地 {h[0]:4.1f} cm", font=small, fill=lift(h[0]))
-                d.text((12 + width // 4, y2), f"左轮离地 {h[1]:4.1f} cm", font=small, fill=lift(h[1]))
+                step = width // 4 if len(wheels) == 2 else width // 5
+                for k, (label, *_) in enumerate(wheels):
+                    d.text((12 + k * step, y2), f"{label} {h[k]:4.1f} cm", font=small, fill=lift(h[k]))
                 if jump is not None and bool(jump.active[0]):
                     d.text((12 + 3 * width // 4, 6), "跳跃!", font=font, fill=(255, 80, 80))
                 if turning:
                     yaw = robot.data.root_link_ang_vel_w[0, 2].item()
-                    d.text((12 + width // 2, y2), f"转弯 指令 {wz:+.1f} 实际 {yaw:+.2f} rad/s", font=small,
+                    # Two wheel labels leave the right half free; pinov1's four fill the row, so turn goes below them.
+                    xy = (12 + width // 2, y2) if len(wheels) == 2 else (12, y2 + small.size + 4)
+                    d.text(xy, f"转弯 指令 {wz:+.1f} 实际 {yaw:+.2f} rad/s", font=small,
                            fill=(120, 220, 255) if wz else (200, 200, 200))
                 writer.send(np.asarray(img.convert("RGB")))
     writer.close()

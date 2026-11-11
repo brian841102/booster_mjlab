@@ -8,6 +8,7 @@ from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 import booster_mjlab.tasks.velocity.config.nemov3  # noqa
+import booster_mjlab.tasks.velocity.config.pinov1  # noqa
 task, ckpt, tag = sys.argv[1:4]
 vx = float(sys.argv[4]) if len(sys.argv) > 4 else -0.3
 seconds = float(sys.argv[5]) if len(sys.argv) > 5 else 12.0
@@ -25,7 +26,9 @@ runner.load(ckpt, load_cfg={"actor": True, "discriminator": False}, strict=True,
 pol = runner.get_inference_policy(device="cuda:0")
 robot = env.scene["robot"]
 cmdterm = env.command_manager.get_term("twist")
-bi = [robot.body_names.index(b) for b in ("left_wheel_link", "right_wheel_link")]
+# pinov1 has two wheels per foot: the gap is measured between the driven rear wheels.
+wheel_names = ("left_rear_wheel_link", "right_rear_wheel_link") if "Pinov1" in task else ("left_wheel_link", "right_wheel_link")
+bi = [robot.body_names.index(b) for b in wheel_names]
 hj = [robot.joint_names.index(j) for j in ("left_hip_roll_joint", "right_hip_roll_joint")]
 fell = torch.zeros(n, dtype=torch.bool, device="cuda:0")
 rows = []
