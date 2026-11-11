@@ -75,6 +75,18 @@ from booster_mjlab.tasks.velocity.mdp.wheel_feet import (
     wheel_swing_height,
 )
 from booster_mjlab.tasks.velocity.mdp.gait_clock import GaitClockCommandCfg
+from booster_mjlab.tasks.velocity.mdp.jump import (
+    JumpFeedforwardJointPositionActionCfg,
+    jump_feedforward_alpha,
+    JumpCommandCfg,
+    hop_outside_jump,
+    jump_air_height,
+    jump_height_excess,
+    jump_crouch,
+    jump_leg_template,
+    jump_takeoff_velocity,
+    jump_trunk_rise,
+)
 from booster_mjlab.tasks.velocity.mdp.play_controls import (
     PlayControlsCommandCfg,
     push_if_enabled,
@@ -270,6 +282,60 @@ ARM_SWING_ACTION_SCALE = {
     "joint_rElbow": 0.25,
     "joint_lElbow": 0.25,
 }
+# Jump on a button while skating (task nemov3_velocity_amp_jump, tools/nemov3_finetune_jump.md; mdp/jump.py). The user
+# set the jump height to 5 cm (wheel clearance). JUMP_WEIGHTS maps reward term -> weight; the task reward is scaled by
+# (1 - style weight) = 0.3 in the AMP runner like every other term.
+JUMP_TARGET_HEIGHT_M = 0.05
+JUMP_HEIGHT_LIMIT_M = 0.09
+JUMP_WEIGHTS = {
+    "jump_air_height": 10.0,
+    "jump_takeoff_velocity": 2.0,
+    "jump_trunk_rise": 0.0,  # J02+
+    "jump_crouch": 0.0,  # J03+
+    "jump_leg_template": 0.0,  # J04+
+    "jump_height_excess": -2.0,
+    "hop_outside_jump": -2.0,
+}
+JUMP_TRUNK_RISE_CAP_M = 0.08  # leg extension (~3 cm) + 5 cm of flight
+JUMP_CROUCH_DEPTH_M = 0.04  # J03: crouch this far below the height at the press before pushing off
+# J04: leg template (phase, (hip pitch, calf)) for both legs: default stance (-0.26, 0.43) -> crouch -> straight ->
+# default. The crouch keeps the hip / calf ratio of the open-loop probe (jump_feasibility.py: hip -d, calf +1.6 d).
+JUMP_LEG_JOINTS = ("right_hip_pitch_joint", "right_calf_joint", "left_hip_pitch_joint", "left_calf_joint")
+JUMP_LEG_KEYFRAMES = (
+    (0.0, (-0.26, 0.43, -0.26, 0.43)),
+    (0.3, (-0.61, 0.99, -0.61, 0.99)),
+    (0.45, (-0.05, 0.05, -0.05, 0.05)),
+    (0.6, (-0.05, 0.05, -0.05, 0.05)),
+    (0.8, (-0.26, 0.43, -0.26, 0.43)),
+    (1.0, (-0.26, 0.43, -0.26, 0.43)),
+)
+JUMP_LEG_TEMPLATE_STD = 0.3
+# J05: the scripted push-off that leaves the ground while Exp 90 balances (jump_feasibility.py, 1.0 m/s): crouch by
+# depth 0.8 (hip -0.26-0.8, calf 0.43+1.28 -> joint limit) in 0.1 s, then extend to (-0.15, 0.1): clearance median
+# 4.3 cm, max 8 cm, 0 of 4 fell. J04's template crouched half as deep and twice as slow.
+# J08 (user: "蹲可以保持久一点"): for a 1.0 s window -- crouch by 0.12 s (phase 0.12), hold the crouch to 0.30 s,
+# extend by 0.42 s, hold straight to 0.6 s, back to the stance by 0.8 s.
+JUMP_LEG_KEYFRAMES_HOLD = (
+    (0.0, (-0.26, 0.43, -0.26, 0.43)),
+    (0.12, (-1.06, 1.55, -1.06, 1.55)),
+    (0.30, (-1.06, 1.55, -1.06, 1.55)),
+    (0.42, (-0.15, 0.10, -0.15, 0.10)),
+    (0.60, (-0.15, 0.10, -0.15, 0.10)),
+    (0.80, (-0.26, 0.43, -0.26, 0.43)),
+    (1.0, (-0.26, 0.43, -0.26, 0.43)),
+)
+JUMP_LEG_KEYFRAMES_DEEP = (
+    (0.0, (-0.26, 0.43, -0.26, 0.43)),
+    (0.15, (-1.06, 1.55, -1.06, 1.55)),
+    (0.3, (-0.15, 0.10, -0.15, 0.10)),
+    (0.55, (-0.15, 0.10, -0.15, 0.10)),
+    (0.8, (-0.26, 0.43, -0.26, 0.43)),
+    (1.0, (-0.26, 0.43, -0.26, 0.43)),
+)
+JUMP_TAKEOFF_MAX_PHASE = 0.5
+JUMP_HOP_MIN_HEIGHT_M = 0.01  # unasked hops count only above this clearance (fast skating flickers off the ground)
+JUMP_TAKEOFF_V_CAP = 1.2
+
 ARM_DEFAULT_POS = {
     "joint_rShoulderPitch": 0.05,
     "joint_lShoulderPitch": 0.05,
@@ -309,6 +375,7 @@ def nemov3_flat_env_cfg(
     backward: float = 0.0,
     wheel_gain: float = 0.0,
     wheel_armature: tuple[float, float] | None = None,
+    jump: dict | bool = False,
 ) -> ManagerBasedRlEnvCfg:
     """Create Nemov3 flat-terrain velocity tracking configuration.
 
@@ -322,6 +389,11 @@ def nemov3_flat_env_cfg(
     With ``wheel_armature=(lo, hi)`` both wheel joints get one armature per environment drawn uniformly in [lo, hi] at every
     reset (the XML default is 0.01; Exp 93c: armature 0 reproduces the ~5.9 Hz standing oscillation in simulation, with kd
     unchanged). Off in play.
+
+    With ``jump`` (True, or a dict overriding JumpCommandCfg fields and the JUMP_* constants: "weights", "target_height",
+    "height_limit") adds the jump button (mdp/jump.py): a ``jump_command`` term (flag, phase) in the actor / critic
+    observations, the jump rewards (JUMP_WEIGHTS) and the AMP style mask around each jump. Random triggers in
+    training, none in play (the evaluation tools press the button).
 
     With ``turn=True`` the yaw-rate command is sampled from [-TURN_YAW_RATE_MAX, TURN_YAW_RATE_MAX] rad/s (left
     and right turns) instead of being pinned to 0.
@@ -791,6 +863,78 @@ def nemov3_flat_env_cfg(
             group.terms["gait_clock"] = ObservationTermCfg(
                 func=mdp.generated_commands, params={"command_name": "gait_clock"}
             )
+
+    if jump:
+        jump_args = dict(jump) if isinstance(jump, dict) else {}
+        weights = {**JUMP_WEIGHTS, **jump_args.pop("weights", {})}
+        target = jump_args.pop("target_height", JUMP_TARGET_HEIGHT_M)
+        # crouch_phase (J03+): the first part of the window is for crouching; rise / take-off pay only after it.
+        crouch_phase = jump_args.pop("crouch_phase", 0.0)
+        crouch_depth = jump_args.pop("crouch_depth", JUMP_CROUCH_DEPTH_M)  # J08+
+        rise_cap = jump_args.pop("rise_cap", JUMP_TRUNK_RISE_CAP_M)  # J08+
+        leg_keyframes = jump_args.pop("leg_keyframes", JUMP_LEG_KEYFRAMES)
+        # feedforward (J06+): (start, end) iteration of the linear 1 -> 0 anneal of the leg template feed-forward.
+        feedforward = jump_args.pop("feedforward", None)
+        # feedforward_adaptive (J07+): (period its, hi_rate, lo_rate, down, up), alpha follows the jump success rate.
+        adaptive = jump_args.pop("feedforward_adaptive", None)
+        if adaptive is not None:
+            feedforward = feedforward or (0, 0)
+        if feedforward is not None:
+            old = cfg.actions["joint_pos"]
+            assert type(old) is JointPositionActionCfg, "the jump feed-forward replaces a plain joint-position action"
+            cfg.actions["joint_pos"] = JumpFeedforwardJointPositionActionCfg(
+                **{f.name: getattr(old, f.name) for f in dataclasses.fields(old) if f.init},
+                ff_joint_names=JUMP_LEG_JOINTS,
+                keyframes=leg_keyframes,
+                anneal_steps=(0, 0) if play else tuple(i * STEPS_PER_ITERATION for i in feedforward),
+                adaptive=None
+                if play or adaptive is None
+                else (int(adaptive[0] * STEPS_PER_ITERATION), *adaptive[1:]),
+            )
+            cfg.curriculum["jump_ff_alpha"] = CurriculumTermCfg(func=jump_feedforward_alpha)
+        height_limit = jump_args.pop("height_limit", JUMP_HEIGHT_LIMIT_M)
+        cfg.commands["jump"] = JumpCommandCfg(
+            resampling_time_range=(1.0e9, 1.0e9), auto_trigger=not play, **jump_args
+        )
+        for group in ("actor", "critic"):
+            cfg.observations[group].terms["jump_command"] = ObservationTermCfg(
+                func=mdp.generated_commands, params={"command_name": "jump"}
+            )
+        wheels = SceneEntityCfg("robot", body_names=WHEEL_LINK_NAMES)
+        jump_terms = {
+            "jump_air_height": (
+                jump_air_height,
+                {"sensor_name": "feet_ground_contact", "asset_cfg": wheels, "target_height": target},
+            ),
+            "jump_takeoff_velocity": (
+                jump_takeoff_velocity,
+                {
+                    "min_phase": crouch_phase,
+                    "max_phase": crouch_phase + JUMP_TAKEOFF_MAX_PHASE * (1.0 - crouch_phase),
+                    "v_cap": JUMP_TAKEOFF_V_CAP,
+                },
+            ),
+            "jump_trunk_rise": (jump_trunk_rise, {"cap": rise_cap, "min_phase": crouch_phase}),
+            "jump_crouch": (jump_crouch, {"end_phase": crouch_phase, "depth": crouch_depth}),
+            "jump_leg_template": (
+                jump_leg_template,
+                {
+                    "asset_cfg": SceneEntityCfg("robot", joint_names=JUMP_LEG_JOINTS, preserve_order=True),
+                    "keyframes": leg_keyframes,
+                    "std": JUMP_LEG_TEMPLATE_STD,
+                },
+            ),
+            "jump_height_excess": (jump_height_excess, {"asset_cfg": wheels, "limit": height_limit, "scale": 0.02}),
+            "hop_outside_jump": (
+                hop_outside_jump,
+                {"sensor_name": "feet_ground_contact", "asset_cfg": wheels, "min_height": JUMP_HOP_MIN_HEIGHT_M},
+            ),
+        }
+        for name, (func, params) in jump_terms.items():
+            if weights.get(name):
+                cfg.rewards[name] = RewardTermCfg(
+                    func=func, weight=weights[name], params={"command_name": "jump", **params}
+                )
 
     cfg.episode_length_s = NEMOV3_TRAIN_EPISODE_LENGTH_S
     if play:

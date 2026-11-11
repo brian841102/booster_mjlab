@@ -20,7 +20,13 @@ from booster_mjlab.tasks.velocity.mdp.wheel_feet import (
 )
 from booster_mjlab.tasks.velocity.rl.runner import VelocityAmpOnPolicyRunner
 
-from .env_cfgs import FOOT_LIFT_HIP_ROLL_LIMIT_RAD, UPRIGHT_STD_MOVING_RELAXED, nemov3_flat_env_cfg
+from .env_cfgs import (
+    FOOT_LIFT_HIP_ROLL_LIMIT_RAD,
+    JUMP_LEG_KEYFRAMES_DEEP,
+    JUMP_LEG_KEYFRAMES_HOLD,
+    UPRIGHT_STD_MOVING_RELAXED,
+    nemov3_flat_env_cfg,
+)
 from .rl_cfg import (
     NEMOV3_AMP_DATASET_ROOT_SYMMETRIC,
     NEMOV3_MIRROR_LOSS_COEFF,
@@ -371,6 +377,192 @@ _register(
         "trunk_mass_com": "mass",
         "backward": NEMOV3_BACKWARD_SPEED,
         "wheel_armature": (0.0, 0.01),
+    },
+    {"mirror": True, "mirror_loss_coeff": NEMOV3_MIRROR_LOSS_COEFF},
+    NEMOV3_AMP_ARM_JOINT_NAMES,
+)
+# Jump on a button while skating forward (user, 2026-11-11; task nemov3_velocity_amp_jump, tools/nemov3_finetune_jump.md):
+# Exp 90 + the jump command / rewards of mdp/jump.py (5 cm wheel clearance). Warm-started from Exp 90@2999 with the two
+# new observation columns zero-weighted (tools/nemov3_tools/jump/widen_checkpoint.py).
+_EXP90 = {**_DEPLOY_PD, "actuator_delay": NEMOV3_MERGED_DELAY, "trunk_mass_com": "mass", "backward": NEMOV3_BACKWARD_SPEED}
+_register(
+    "-Clock-Arms-NarrowStance-Mirror-SymLoss-Turn-FixHeadWaist-DeployPD-MergedDelay-TrunkMass-Backward-Jump",
+    {**_EXP90, "jump": True},
+    {"mirror": True, "mirror_loss_coeff": NEMOV3_MIRROR_LOSS_COEFF},
+    NEMOV3_AMP_ARM_JOINT_NAMES,
+)
+# J02: J01 had no jump signal in 470 iterations (both wheels never left the ground on purpose). Dense trunk-rise reward
+# (+10) and a stronger take-off velocity reward (2 -> 5); seeded with the leg push-off std raised to 0.3.
+_register(
+    "-Clock-Arms-NarrowStance-Mirror-SymLoss-Turn-FixHeadWaist-DeployPD-MergedDelay-TrunkMass-Backward-JumpRise",
+    {**_EXP90, "jump": {"weights": {"jump_trunk_rise": 10.0, "jump_takeoff_velocity": 5.0}}},
+    {"mirror": True, "mirror_loss_coeff": NEMOV3_MIRROR_LOSS_COEFF},
+    NEMOV3_AMP_ARM_JOINT_NAMES,
+)
+# J03 (user: "跳跃理论上要先弯曲腿再跳起"): J02 straightened the legs from the default stance (calf 0.43 -> 0.1~0.3,
+# trunk +1.5~4.5 cm) without crouching, too short a stroke to leave the ground. Window 0.6 -> 0.8 s; its first 30 %
+# (0.24 s) pays for crouching 4 cm, the rise / take-off rewards pay only after it.
+_register(
+    "-Clock-Arms-NarrowStance-Mirror-SymLoss-Turn-FixHeadWaist-DeployPD-MergedDelay-TrunkMass-Backward-JumpCrouch",
+    {
+        **_EXP90,
+        "jump": {
+            "duration_s": 0.8,
+            "crouch_phase": 0.3,
+            "weights": {"jump_crouch": 5.0, "jump_trunk_rise": 10.0, "jump_takeoff_velocity": 5.0},
+        },
+    },
+    {"mirror": True, "mirror_loss_coeff": NEMOV3_MIRROR_LOSS_COEFF},
+    NEMOV3_AMP_ARM_JOINT_NAMES,
+)
+# J05: J04 with (1) the jumps confined to half of the envs (per episode) and a mean wait of 3 s: J04 masked the AMP
+# style reward for ~42 % of the forward-skating time and the gait faded (hip swing at 0.6 m/s 0.20 -> 0.09); (2) the
+# deep, fast template measured to leave the ground (JUMP_LEG_KEYFRAMES_DEEP; crouch by phase 0.15 = 0.12 s).
+_register(
+    "-Clock-Arms-NarrowStance-Mirror-SymLoss-Turn-FixHeadWaist-DeployPD-MergedDelay-TrunkMass-Backward-JumpTemplateHalf",
+    {
+        **_EXP90,
+        "jump": {
+            "duration_s": 0.8,
+            "crouch_phase": 0.15,
+            "mean_interval_s": 3.0,
+            "env_fraction": 0.5,
+            "leg_keyframes": JUMP_LEG_KEYFRAMES_DEEP,
+            "weights": {
+                "jump_crouch": 5.0,
+                "jump_trunk_rise": 10.0,
+                "jump_takeoff_velocity": 5.0,
+                "jump_leg_template": 10.0,
+            },
+        },
+    },
+    {"mirror": True, "mirror_loss_coeff": NEMOV3_MIRROR_LOSS_COEFF},
+    NEMOV3_AMP_ARM_JOINT_NAMES,
+)
+# J06: J05 hardly bent the knees (calf 0.29~0.33: the deep template is too far from the stance for its reward to give
+# a gradient). The template is fed forward to the hip pitch / calf targets inside the jump window, annealed 1 -> 0 over
+# iterations 300..1100, so the robot jumps from the start and the policy takes the push-off over (play: no feed-forward).
+_register(
+    "-Clock-Arms-NarrowStance-Mirror-SymLoss-Turn-FixHeadWaist-DeployPD-MergedDelay-TrunkMass-Backward-JumpFeedforward",
+    {
+        **_EXP90,
+        "jump": {
+            "duration_s": 0.8,
+            "crouch_phase": 0.15,
+            "mean_interval_s": 3.0,
+            "env_fraction": 0.5,
+            "leg_keyframes": JUMP_LEG_KEYFRAMES_DEEP,
+            "feedforward": (300, 1100),
+            "weights": {
+                "jump_crouch": 5.0,
+                "jump_trunk_rise": 10.0,
+                "jump_takeoff_velocity": 5.0,
+                "jump_leg_template": 10.0,
+            },
+        },
+    },
+    {"mirror": True, "mirror_loss_coeff": NEMOV3_MIRROR_LOSS_COEFF},
+    NEMOV3_AMP_ARM_JOINT_NAMES,
+)
+# J07 (resumes J06b@1399): J06b jumped by itself after the feed-forward was gone (100 % at @1100) but 7.8~9.3 cm high
+# (user target 5 cm). Height bound 9 -> 6.5 cm, its weight -2 -> -10; everything else as J06b (the anneal is over).
+_register(
+    "-Clock-Arms-NarrowStance-Mirror-SymLoss-Turn-FixHeadWaist-DeployPD-MergedDelay-TrunkMass-Backward-JumpFeedforwardLow",
+    {
+        **_EXP90,
+        "jump": {
+            "duration_s": 0.8,
+            "crouch_phase": 0.15,
+            "mean_interval_s": 3.0,
+            "env_fraction": 0.5,
+            "leg_keyframes": JUMP_LEG_KEYFRAMES_DEEP,
+            "feedforward": (300, 1100),
+            "height_limit": 0.065,
+            "weights": {
+                "jump_crouch": 5.0,
+                "jump_trunk_rise": 10.0,
+                "jump_takeoff_velocity": 5.0,
+                "jump_leg_template": 10.0,
+                "jump_height_excess": -10.0,
+            },
+        },
+    },
+    {"mirror": True, "mirror_loss_coeff": NEMOV3_MIRROR_LOSS_COEFF},
+    NEMOV3_AMP_ARM_JOINT_NAMES,
+)
+# J08 (user, 2026-11-11: "续训蹲更低跳更高一点 看看能作到啥程度"; resumes J07@1998): how high can it go. Air-height
+# pay saturates at 15 cm instead of 5, the height bound moves to 20 cm at -2, the trunk-rise cap 8 -> 20 cm, and the
+# crouch reward pays up to 12 cm of drop (was 4) at +10 (was +5). User: "蹲可以保持久一点": the window grows to 1.0 s
+# and the template holds the crouch from 0.12 to 0.30 s before the push-off (JUMP_LEG_KEYFRAMES_HOLD); the crouch
+# reward covers the first 0.30 s, the take-off / rise rewards start after it.
+_register(
+    "-Clock-Arms-NarrowStance-Mirror-SymLoss-Turn-FixHeadWaist-DeployPD-MergedDelay-TrunkMass-Backward-JumpHigh",
+    {
+        **_EXP90,
+        "jump": {
+            "duration_s": 1.0,
+            "crouch_phase": 0.30,
+            "mean_interval_s": 3.0,
+            "env_fraction": 0.5,
+            "leg_keyframes": JUMP_LEG_KEYFRAMES_HOLD,
+            "feedforward": (300, 1100),
+            "target_height": 0.15,
+            "height_limit": 0.20,
+            "crouch_depth": 0.12,
+            "rise_cap": 0.20,
+            "weights": {
+                "jump_crouch": 10.0,
+                "jump_trunk_rise": 10.0,
+                "jump_takeoff_velocity": 5.0,
+                "jump_leg_template": 10.0,
+                "jump_height_excess": -2.0,
+            },
+        },
+    },
+    {"mirror": True, "mirror_loss_coeff": NEMOV3_MIRROR_LOSS_COEFF},
+    NEMOV3_AMP_ARM_JOINT_NAMES,
+)
+# J07b (spare, not run): J06b with the feed-forward following the jump success rate instead of a fixed schedule: every iteration,
+# alpha -= 0.01 if >= 80 % of the finished jumps succeeded, += 0.005 if < 50 % (J06b's own push-off lagged its anneal).
+_register(
+    "-Clock-Arms-NarrowStance-Mirror-SymLoss-Turn-FixHeadWaist-DeployPD-MergedDelay-TrunkMass-Backward-JumpFeedforwardAdaptive",
+    {
+        **_EXP90,
+        "jump": {
+            "duration_s": 0.8,
+            "crouch_phase": 0.15,
+            "mean_interval_s": 3.0,
+            "env_fraction": 0.5,
+            "leg_keyframes": JUMP_LEG_KEYFRAMES_DEEP,
+            "feedforward_adaptive": (1, 0.8, 0.5, 0.01, 0.005),
+            "weights": {
+                "jump_crouch": 5.0,
+                "jump_trunk_rise": 10.0,
+                "jump_takeoff_velocity": 5.0,
+                "jump_leg_template": 10.0,
+            },
+        },
+    },
+    {"mirror": True, "mirror_loss_coeff": NEMOV3_MIRROR_LOSS_COEFF},
+    NEMOV3_AMP_ARM_JOINT_NAMES,
+)
+# J04: J03 hardly crouched in 200 iterations (trunk drop 0.1~0.3 cm). Adds a crouch / push-off / recover template for
+# the hip pitch and calf joints (JUMP_LEG_KEYFRAMES, +10) and fires the button more often (mean wait 2.5 -> 1.5 s).
+_register(
+    "-Clock-Arms-NarrowStance-Mirror-SymLoss-Turn-FixHeadWaist-DeployPD-MergedDelay-TrunkMass-Backward-JumpTemplate",
+    {
+        **_EXP90,
+        "jump": {
+            "duration_s": 0.8,
+            "crouch_phase": 0.3,
+            "mean_interval_s": 1.5,
+            "weights": {
+                "jump_crouch": 5.0,
+                "jump_trunk_rise": 10.0,
+                "jump_takeoff_velocity": 5.0,
+                "jump_leg_template": 10.0,
+            },
+        },
     },
     {"mirror": True, "mirror_loss_coeff": NEMOV3_MIRROR_LOSS_COEFF},
     NEMOV3_AMP_ARM_JOINT_NAMES,
