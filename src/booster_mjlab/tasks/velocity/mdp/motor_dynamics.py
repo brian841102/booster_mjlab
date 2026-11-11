@@ -127,7 +127,7 @@ def sample_actuator_delay(
     cmd_groups: tuple[str, ...] = (),
     cmd_delay_range_s: tuple[float, float] = (0.0, 0.0),
     asset_name: str = "robot",
-) -> None:
+) -> dict[str, torch.Tensor]:
     """Reset event: one command lag in [0, max_lag] physics steps per environment and actuator group, kept for the
     episode (flamingo_rl_train's DelayedPD actuators: a group shares one lag). ``groups`` are joint regexes; each
     actuator joins the first group its joint matches. The actuators' delay buffers must not resample on their own
@@ -135,7 +135,9 @@ def sample_actuator_delay(
 
     With ``cmd_groups`` a second lag is added on top, drawn like MotorTargetDynamics' transport delay (uniform in
     ``cmd_delay_range_s``, rounded to physics steps) once per environment and cmd group: the two delays of Exp 83
-    (actuator delay per joint group + motor-target delay per action term) merged into one buffer (Exp 85)."""
+    (actuator delay per joint group + motor-target delay per action term) merged into one buffer (Exp 85).
+
+    Returns the lags set, {joint name: (len(env_ids),) physics steps} (SuperMimic records them in its sim context)."""
     ids = _env_ids(env_ids, env.num_envs, env.device)
     all_delayed = [a for a in env.scene[asset_name].actuators if a.has_delay]
     lags = {id(a): torch.zeros(ids.numel(), dtype=torch.long, device=env.device) for a in all_delayed}
@@ -153,6 +155,7 @@ def sample_actuator_delay(
         assert not patterns or not actuators, f"actuators in no delay group: {[a.target_names for a in actuators]}"
     for actuator in all_delayed:
         actuator.set_lags(lags[id(actuator)], ids)
+    return {name: lags[id(a)] for a in all_delayed for name in a.target_names}
 
 
 def _cmd_lag(delay_range_s: tuple[float, float], dt: float, n: int, device) -> torch.Tensor:
