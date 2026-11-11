@@ -23,8 +23,13 @@ from booster_mjlab.tasks.supermimic.supermimic_env_cfg import SuperMimicEnvCfg
 REPO_ROOT = str(BOOSTER_MJLAB_SRC_PATH.parents[1])
 
 
+def roll_action_hist(a_hist: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
+    """Previous-action history (..., J * H), newest first, after action a."""
+    return torch.cat((a, a_hist[..., : a_hist.shape[-1] - a.shape[-1]]), -1) if a_hist.shape[-1] else a_hist
+
+
 class SuperMimicEnv:
-    def __init__(self, env: ManagerBasedRlEnv, gamma: float = 0.99, motion_dir: str | None = None):
+    def __init__(self, env: ManagerBasedRlEnv, gamma: float = 0.99, motion_dir: str | None = None, action_hist: int = 0):
         cfg: SuperMimicEnvCfg = env.cfg  # type: ignore[assignment]
         self.env, self.cfg, self.sm = env, cfg, cfg.supermimic
         assert abs(env.step_dt - CONTROL_DT) < 1e-9, f"SuperMimic runs at {1 / CONTROL_DT:.0f} Hz, env step_dt {env.step_dt}"
@@ -58,22 +63,19 @@ class SuperMimicEnv:
         )
         self.mdp = TrackingMdp(self.sm, self.kin, self.motion, self.default_q, self.pos)
 
-        # ---- sim context xi = [friction, joint offsets (J), torso CoM offset (3)] ----
-        # friction and CoM were drawn by the startup events (robot_friction, torso_com); read them back
-        model = env.sim.model
+        # ---- sim context xi (layout: TrackingMdp) ----
+        # the startup events drew friction, CoM (and with sim2real mass, inertia, PD gains, ground contact): read back
         self.xi = torch.zeros(self.N, self.mdp.xi_dim, device=dev)
-        geom0 = int(robot.data.indexing.geom_ids[0])
-        self.xi[:, 0] = torch.as_tensor(model.geom_friction, device=dev).expand(self.N, -1, -1)[:, geom0, 0]
-        if self.sm.com_body:
-            torso = int(robot.data.indexing.body_ids[robot.find_bodies(self.sm.com_body)[0][0]])
-            ipos = torch.as_tensor(model.body_ipos, device=dev).expand(self.N, -1, -1)[:, torso]
-            default_ipos = torch.as_tensor(env.sim.mj_model.body_ipos[torso], dtype=torch.float32, device=dev)
-            self.xi[:, 1 + J :] = ipos - default_ipos
+        self._read_model_context()
+        self.s2r = self.sm.sim2real
+        self.wheel_limit = self.s2r.wheel_speed_limit if self.s2r else None
+        self.next_push = torch.zeros(self.N, dtype=torch.long, device=dev)
 
         # ---- episode bookkeeping ----
         self.f = torch.zeros(self.N, dtype=torch.long, device=dev)
         self.ep_step = torch.zeros(self.N, dtype=torch.long, device=dev)
         self.a_prev = torch.zeros(self.N, J, device=dev)
+        self.a_hist = torch.zeros(self.N, J * action_hist, device=dev)  # a_{t-1}, ..., a_{t-H} (world model input)
         self.start_bin = torch.zeros(self.N, dtype=torch.long, device=dev)
         self.ep_disc_ret = torch.zeros(self.N, device=dev)
         self.ep_ret = torch.zeros(self.N, device=dev)
@@ -87,6 +89,68 @@ class SuperMimicEnv:
     @property
     def num_joints(self) -> int:
         return len(self.joint_names)
+
+    def _read_model_context(self):
+        env, robot, dev, J, b = self.env, self.robot, self.device, self.num_joints, self.mdp.xi_base
+        model, mj = env.sim.model, env.sim.mj_model
+
+        def field(name: str) -> torch.Tensor:  # (N, ...) whether or not a DR event expanded it per env
+            x = torch.as_tensor(getattr(model, name), device=dev)
+            return x.expand(self.N, *x.shape[1:]) if x.shape[0] == 1 else x
+
+        def default(name: str, idx: int) -> torch.Tensor:
+            return torch.as_tensor(getattr(mj, name)[idx], dtype=torch.float32, device=dev)
+
+        geom = int(robot.data.indexing.geom_ids[robot.find_geoms(self.sm.friction_geoms)[0][0]])
+        self.xi[:, 0] = field("geom_friction")[:, geom, 0]
+        if self.sm.com_body:
+            torso = int(robot.data.indexing.body_ids[robot.find_bodies(self.sm.com_body)[0][0]])
+            self.xi[:, 1 + J : b] = field("body_ipos")[:, torso] - default("body_ipos", torso)
+        if not self.sm.sim2real:
+            return
+        self.xi[:, b] = field("body_mass")[:, torso] - default("body_mass", torso)
+        # principal moments, sorted (pseudo_inertia re-diagonalizes, so the principal axes may come out in another order)
+        moments = field("body_inertia")[:, torso].sort(-1).values
+        self.xi[:, b + 1 : b + 4] = torch.log(moments / default("body_inertia", torso).sort().values)
+        # joint -> its actuator: kp = gainprm[0], kd = -biasprm[2] (position); kv = gainprm[0] = -biasprm[2] (wheels)
+        jids = robot.data.indexing.joint_ids.tolist()
+        ctrl = [next(a for a in range(mj.nu) if mj.actuator_trnid[a, 0] == j) for j in jids]
+        self.xi[:, b + 4 : b + 4 + J] = field("actuator_gainprm")[:, ctrl, 0] / default("actuator_gainprm", ctrl)[:, 0]
+        self.xi[:, b + 4 + J : b + 4 + 2 * J] = field("actuator_biasprm")[:, ctrl, 2] / default("actuator_biasprm", ctrl)[:, 2]
+        ground = int(env.scene["terrain"].data.indexing.geom_ids[0]) if "terrain" in env.scene.entities else 0
+        o = b + 4 + 3 * J
+        self.xi[:, o : o + 2] = field("geom_solref")[:, ground, :2]
+        self.xi[:, o + 2 : o + 5] = field("geom_solimp")[:, ground, :3]
+
+    def _sample_delays(self, env_ids: torch.Tensor):
+        """Per-episode command lags (AMP Exp 85+ merged delay), recorded in xi [s]."""
+        from booster_mjlab.tasks.velocity.mdp.motor_dynamics import sample_actuator_delay
+
+        d = self.s2r.actuator_delay
+        lags = sample_actuator_delay(self.env, env_ids, d.groups, d.max_lag, d.cmd_groups, d.cmd_delay_range_s)
+        o = self.mdp.xi_base + 4 + 2 * self.num_joints
+        for j, name in enumerate(self.joint_names):
+            self.xi[env_ids, o + j] = lags[name].float() * self.env.physics_dt
+
+    def _push(self, done: torch.Tensor) -> torch.Tensor:
+        """Random horizontal root velocity kicks, applied after the transition was recorded. -> the envs pushed."""
+        cut = torch.zeros(self.N, dtype=torch.bool, device=self.device)
+        if not self.s2r or not self.s2r.push_interval_s or self.eval_mode:
+            return cut
+        cut = (self.ep_step >= self.next_push) & ~done
+        ids = cut.nonzero(as_tuple=False).squeeze(-1)
+        if len(ids) > 0:
+            _, _, v, w = self.state()[:4]
+            v = v[ids].clone()
+            v[:, :2] += torch.empty(len(ids), 2, device=self.device).uniform_(-self.s2r.push_vel_xy, self.s2r.push_vel_xy)
+            self.robot.write_root_link_velocity_to_sim(torch.cat((v, w[ids]), -1), env_ids=ids)
+            self._schedule_push(ids)
+        return cut
+
+    def _schedule_push(self, env_ids: torch.Tensor):
+        lo, hi = self.s2r.push_interval_s
+        n = len(env_ids)
+        self.next_push[env_ids] = self.ep_step[env_ids] + torch.empty(n, device=self.device).uniform_(lo / CONTROL_DT, hi / CONTROL_DT).long()
 
     # ------------------------------------------------------------------ state
     def state(self):
@@ -139,12 +203,17 @@ class SuperMimicEnv:
         self.f[env_ids] = frames
         self.ep_step[env_ids] = 0
         self.a_prev[env_ids] = 0.0
+        self.a_hist[env_ids] = 0.0
         self.start_bin[env_ids] = bins
         self.ep_disc_ret[env_ids] = 0.0
         self.ep_ret[env_ids] = 0.0
         if not self.eval_mode:
             J = self.num_joints
             self.xi[env_ids, 1 : 1 + J] = torch.empty(n, J, device=dev).uniform_(-1, 1) * self.sm.joint_offset_range * self.pos
+            if self.s2r and self.s2r.actuator_delay:
+                self._sample_delays(env_ids)
+            if self.s2r and self.s2r.push_interval_s:
+                self._schedule_push(env_ids)
 
     # ------------------------------------------------------------------ step
     def _physics_step(self):
@@ -163,7 +232,10 @@ class SuperMimicEnv:
         J = self.num_joints
         # position joints: target = default + offset + scale * a; velocity joints (wheels): speed target = scale * a
         self.robot.set_joint_position_target(self.default_q + xi[:, 1 : 1 + J] + self.alpha * a * self.pos)
-        self.robot.set_joint_velocity_target(self.alpha * a * self.vel)
+        wheel = self.alpha * a * self.vel
+        if self.wheel_limit:
+            wheel = wheel.clamp(-self.wheel_limit, self.wheel_limit)
+        self.robot.set_joint_velocity_target(wheel)
         self._physics_step()
         S1 = self.state()
         f1 = f + 1
@@ -174,14 +246,16 @@ class SuperMimicEnv:
         done = term | timeout
         out = {
             "s": flatten_state(S), "a": a.clone(), "a_prev": a_prev, "f": f, "s1": flatten_state(S1), "r": r,
-            "term": term, "done": done, "ep_step": ep_step, "xi": xi, "terms": terms,
+            "term": term, "done": done, "ep_step": ep_step, "xi": xi, "terms": terms, "a_hist": self.a_hist.clone(),
         }  # fmt: skip
+        out["cut"] = self._push(done)  # the next transition starts from a kicked state: world-model windows stop here
         # bookkeeping
         self.ep_disc_ret += (self.gamma ** ep_step.float()) * r
         self.ep_ret += r
         self.f = f1
         self.ep_step = ep_step + 1
         self.a_prev = a.clone()
+        self.a_hist = roll_action_hist(self.a_hist, a)
         if self.eval_mode:
             self.failed_eval |= term & ~self.done_eval
             self.done_eval |= done

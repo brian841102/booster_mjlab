@@ -26,7 +26,10 @@ class TrackingMdp:
         J = self.num_joints = default_q.shape[-1]
         self.num_tracked = len(cfg.tracked_bodies)
         self.obs_dim = 3 * J + 12
-        self.xi_dim = 1 + J + 3  # friction, joint offsets, CoM offset
+        # xi = [friction, joint offsets (J), CoM offset (3)]; with cfg.sim2real + [torso mass offset, torso inertia
+        # principal moment log-ratio (3, sorted), kp scale (J), kd scale (J), command lag [s] (J), ground solref (2), ground solimp (3)]
+        self.xi_base = 1 + J + 3
+        self.xi_dim = self.xi_base + (1 + 3 + 3 * J + 5 if cfg.sim2real else 0)
         self.critic_extra = J + 3 * self.num_tracked + 3 + 6 + self.xi_dim
         mid, half = (kin.q_lo + kin.q_hi) / 2, (kin.q_hi - kin.q_lo) / 2
         self.soft_lo, self.soft_hi = mid - half * cfg.soft_limit_factor, mid + half * cfg.soft_limit_factor
@@ -36,10 +39,13 @@ class TrackingMdp:
         self.lift_idx = [cfg.tracked_bodies.index(b) for b, _ in cfg.lift_points]
         self.lift_offset = torch.tensor([o for _, o in cfg.lift_points], device=dev).reshape(-1, 3)
         self.w_lift = 1.0 if self.lift_idx else 0.0
+        self.slip_idx = [cfg.tracked_bodies.index(b) for b, _, _ in cfg.slip_points]
+        self.slip_centre = torch.tensor([c for _, c, _ in cfg.slip_points], device=dev).reshape(-1, 3)
+        self.slip_axle = torch.tensor([a for _, _, a in cfg.slip_points], device=dev).reshape(-1, 3)
         self.max_step_reward = (4 * 1.0 + 2 * 0.5 + self.w_lift) * CONTROL_DT
         # Table A.1 sensor noise (uniform half-widths), plus the reference-relative orientation
         self.obs_noise = torch.cat(
-            (torch.full((J,), 0.01, device=dev) * self.pos_mask, torch.full((J,), 0.5, device=dev), torch.full((3,), 0.2, device=dev),
+            (torch.full((J,), 0.01, device=dev) * self.pos_mask, torch.full((J,), cfg.joint_vel_noise, device=dev), torch.full((3,), 0.2, device=dev),
              torch.full((3,), 0.05, device=dev), torch.zeros(J, device=dev), torch.full((6,), 0.05, device=dev))
         )  # fmt: skip
 
@@ -102,9 +108,10 @@ class TrackingMdp:
             # linear, so its pull does not fade with distance like the exp term
             up = (z_ref - z_ref.min(-1, keepdim=True).values) > c.lift_floor_on
             r_floor = (torch.relu(z_ref - z) * up).sum(-1)
+        r_slip = self.wheel_slip(bp, bR, bv, bw) if self.cfg.w_wheel_slip else torch.zeros_like(r_track)
         r_rate = ((a - a_prev) ** 2).sum(-1)
         r_lim = (torch.relu(q - self.soft_hi) + torch.relu(self.soft_lo - q)).sum(-1)
-        r = (r_track + c.w_action_rate * r_rate + c.w_joint_limit * r_lim + c.w_lift_floor * r_floor) * CONTROL_DT
+        r = (r_track + c.w_action_rate * r_rate + c.w_joint_limit * r_lim + c.w_lift_floor * r_floor + c.w_wheel_slip * r_slip) * CONTROL_DT
         if terms:
             return r, {
                 "track": r_track * CONTROL_DT,
@@ -114,8 +121,22 @@ class TrackingMdp:
                 "action_rate": r_rate,
                 "joint_limit": r_lim,
                 **({"e_lift": e_lift, "lift_floor": r_floor} if self.w_lift else {}),
+                **({"wheel_slip": r_slip} if self.cfg.w_wheel_slip else {}),
             }
         return r
+
+    def wheel_slip(self, bp, bR, bv, bw) -> torch.Tensor:
+        """Sum over the wheels of (centre velocity along the axle)^2, weighted by a soft ground contact (centre within
+        ~1.5 cm of the wheel radius above the ground)."""
+        i = self.slip_idx
+        R = bR[..., i, :, :]
+        r = (R @ self.slip_centre.unsqueeze(-1)).squeeze(-1)  # calf origin -> wheel centre, world
+        v = bv[..., i, :] + torch.cross(bw[..., i, :], r, dim=-1)
+        axle = (R @ self.slip_axle.unsqueeze(-1)).squeeze(-1)
+        v_lat = (v * axle).sum(-1)
+        z = bp[..., i, 2] + r[..., 2]
+        contact = torch.sigmoid((self.cfg.wheel_radius + 0.015 - z) / 0.005)
+        return (contact * v_lat**2).sum(-1)
 
     def termination(self, S, f) -> torch.Tensor:
         p, R = S[0], S[1]
@@ -148,10 +169,24 @@ class TrackingMdp:
         return torch.cat((invariant_features(S, self.pos_mask), (m.q[f] - q) * self.pos_mask, e_body, e_root, rel, xi_n), -1)
 
     def normalize_xi(self, xi: torch.Tensor) -> torch.Tensor:
-        """xi = [friction, joint offsets (J), CoM offset (3)] scaled to roughly unit range."""
+        """xi scaled to roughly unit range (layout in __init__)."""
         lo, hi = self.cfg.friction_range
-        J = self.num_joints
-        return torch.cat(
-            ((xi[..., :1] - (lo + hi) / 2) / ((hi - lo) / 2), xi[..., 1 : 1 + J] / self.cfg.joint_offset_range, xi[..., 1 + J :] / self.cfg.com_range[1]),
-            -1,
-        )
+        J, b = self.num_joints, self.xi_base
+        parts = [(xi[..., :1] - (lo + hi) / 2) / ((hi - lo) / 2), xi[..., 1 : 1 + J] / self.cfg.joint_offset_range,
+                 xi[..., 1 + J : b] / self.cfg.com_range[1]]  # fmt: skip
+        s2r = self.cfg.sim2real
+        if s2r:
+            def centred(x, lo, hi):  # -> [-1, 1] over the range
+                return (x - 0.5 * (lo + hi)) / (0.5 * (hi - lo))
+
+            max_lag = s2r.actuator_delay.buffer_steps(CONTROL_DT / 4) * CONTROL_DT / 4 if s2r.actuator_delay else 1.0
+            sr, si = s2r.solref_ranges, s2r.solimp_ranges
+            parts += [
+                centred(xi[..., b : b + 1], *s2r.mass_range),
+                xi[..., b + 1 : b + 4] / 0.1,  # pseudo-inertia alpha +-0.05: inertia x e^(+-0.1)
+                centred(xi[..., b + 4 : b + 4 + J], *s2r.kp_range),
+                centred(xi[..., b + 4 + J : b + 4 + 2 * J], *s2r.kd_range),
+                centred(xi[..., b + 4 + 2 * J : b + 4 + 3 * J], 0.0, max_lag),
+                *[centred(xi[..., b + 4 + 3 * J + k : b + 5 + 3 * J + k], *r) for k, r in enumerate(sr + si)],
+            ]
+        return torch.cat(parts, -1)
