@@ -8,6 +8,7 @@ from booster_mjlab.amp.curriculums import AMP_STYLE_WEIGHT_ATTR
 AMP_STYLE_REWARD_KEY = "Episode_Metrics/Amp/style_reward"
 AMP_TASK_REWARD_KEY = "Episode_Metrics/Amp/task_reward"
 AMP_STYLE_TASK_RATIO_KEY = "Episode_Metrics/Amp/style_task_ratio"
+AMP_STYLE_MASK_ATTR = "amp_style_mask"
 
 
 class AmpRunner:
@@ -88,6 +89,10 @@ class AmpRunner:
                 * self._compute_style_reward_scale()
                 * self.alg.predict_style_reward(next_amp_history).view_as(rewards)
             )
+            # Per-env mask set by the env (e.g. 0 around a jump the reference clips do not contain; mdp/jump.py).
+            style_mask = getattr(self.env.unwrapped, AMP_STYLE_MASK_ATTR, None)
+            if style_mask is not None:
+                style_rewards = style_rewards * style_mask.to(self.device).view_as(rewards)
             rewards = task_rewards + style_rewards
             self._update_amp_metrics_log(
                 extras=extras,
