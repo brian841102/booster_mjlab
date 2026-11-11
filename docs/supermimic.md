@@ -3,7 +3,7 @@
 SuperMimic 用一个学到的世界模型 s_{t+1} = f(s_t, a_t, xi)，把可微的追踪奖励沿想象轨迹反向传播来训练策略（BPTT），
 critic 只负责截断后的价值。与 `tasks/tracking`（BeyondMimic：PPO + mjlab 的奖励 / 观测管理器）是两套不同的 MDP 和算法。
 本文件说明仓库里的位置、数据准备、训练 / 评估指令，以及从 supermimic_vibed（Isaac Lab 3 / Newton）移植过来时对齐的细节。
-**约定：每做一次 SuperMimic 实验，在文末「实验记录」追加一节。**
+**实验记录在 `tools/nemov3_finetune_supermimic.md`。**
 
 ## 目录
 
@@ -22,7 +22,8 @@ src/booster_mjlab/
 │   ├── mdp/                       # kinematics.py（torch FK）、motion.py（clip CSV -> 50 Hz）、tracking.py（可微观测 / 奖励 / 终止）
 │   └── config/nemov3/             # Mjlab-SuperMimic-Flat-Booster-Nemov3 的注册、env 与 runner 配置
 ├── scripts/evaluate_supermimic.py # uv run evaluate-supermimic
-└── scripts/replay_supermimic.py   # uv run replay-supermimic（离线轨迹回放）
+├── scripts/replay_supermimic.py   # uv run replay-supermimic（离线轨迹回放）
+└── scripts/export_supermimic.py   # uv run export-supermimic（ONNX + .motion，给实机 runner）
 submodules/retarget/               # 视频 -> GVHMR -> GMR -> nemov3 参考动作（独立仓库，git submodule）
 ```
 
@@ -60,6 +61,9 @@ uv run evaluate-supermimic Mjlab-SuperMimic-Flat-Booster-Nemov3 --checkpoint <ru
 # 离线轨迹回放（评估录下的 model_<it>_traj.npz；checkpoint 下拉、实体 = 策略、蓝色半透明 = 参考，不占 GPU）
 uv run replay-supermimic Mjlab-SuperMimic-Flat-Booster-Nemov3 --run-dir logs/rsl_rl/nemov3_supermimic/latest
 
+# 导出给实机 runner（ONNX + 每段 .motion + 契约 JSON，放在 <run>/deploy/，格式同 supermimic_vibed 的 tools/export_onnx.py）
+uv run export-supermimic Mjlab-SuperMimic-Flat-Sim2Real-Booster-Nemov3 --checkpoint <run>/model_11000.pt
+
 # 实时推理（viser，网页里可切换 checkpoint、暂停、重置）
 CUDA_VISIBLE_DEVICES=0 uv run play Mjlab-SuperMimic-Flat-Booster-Nemov3 --checkpoint-file <run>/model_10000.pt --viewer viser
 ```
@@ -73,6 +77,11 @@ CUDA_VISIBLE_DEVICES=0 uv run play Mjlab-SuperMimic-Flat-Booster-Nemov3 --checkp
 - `model_<it>.pt` 存网络和配置；`optim.pt` 只存最新一次的优化器状态，供 `--agent.resume True` 续训（replay buffer 不存，续训时先重新收集）。
 - 训练曲线：`train_log.csv`，同时写 TensorBoard（`--agent.logger tensorboard`，默认）。
 - 评估：每段 clip 从第一帧播放一次，摩擦 1.0、无随机化、无噪声；`norm_return` = 不打折回报 / 满分，触发训练终止条件即算失败。
+
+导出的关节顺序默认是 clip CSV 的顺序（= supermimic_vibed 导出、实机 runner `nemov3_supermimic_1270` 读的顺序），ONNX 内部换算到
+训练用的 mjlab 顺序；ONNX 输入固定 `[1, 1270]`。exp3@11000 只用导出文件闭环（CSV 顺序组观测、goal 查 `.motion`）跑三段：
+0/3 失败，0.914 / 0.936 / 0.932（评估 0.919 / 0.937 / 0.930，差别来自训练用 bf16、ONNX 用 fp32）；文件头、PD 增益、布局与
+vibed exp7a 上过机的导出逐项一致。
 
 ## 与 supermimic_vibed（exp5）对齐的地方
 
@@ -95,15 +104,13 @@ CUDA_VISIBLE_DEVICES=0 uv run play Mjlab-SuperMimic-Flat-Booster-Nemov3 --checkp
 
 ## 实验记录
 
-### exp1：移植验证（2026-11-02）
+实验过程、踩过的坑和结论记录在 [`tools/nemov3_finetune_supermimic.md`](../tools/nemov3_finetune_supermimic.md)（与 AMP 的
+`tools/nemov3_finetune.md` 同样用途）。目前：exp1 移植验证（最佳 0.9320，0/3）；sim2real 变体 exp3（世界模型加前 3 步动作）最佳 0.9286，0/3，待上机。
 
-`logs/rsl_rl/nemov3_supermimic/2026-11-02_14-59-18_exp1_dance3_port`，三段舞蹈，默认配置（= exp5），12000 轮，1.24 h（exp5 1.21 h）。
+## Sim2Real 变体
 
-| 轮数 | 1000 | 2000 | 3000 | 4000 | 5000 | 6000 | 7000 | 8000 | 9000 | 10000 | 11000 | 12000 |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| exp1（mjlab） | 0.6530 | 0.8349 | 0.8823 | 0.8930 | 0.9065 | 0.9148 | 0.9138 | 0.9098 | 0.9187 | **0.9320** | 0.9151 | 0.9101 |
-| exp5（Isaac Lab / Newton） | 0.6619 | 0.8236 | 0.8781 | 0.8793 | 0.9155 | 0.8904 | 0.9014 | 0.9213 | 0.9252 | 0.9008 | **0.9257** | 0.9175 |
-
-- 所有评估都是 0/3 失败。最佳 10000 轮 0.9320（roller32 0.9176、roller_house 0.9501、three_turn 0.9283），高于 exp5 最佳 0.9257（11000 轮）和 exp3 最佳 0.9276（8000 轮）。
-- 8000–12000 轮的平均：exp1 0.9171、exp5 0.9181，持平；曲线在 0.90–0.93 之间波动，与 exp5 一样。
-- 结论：移植后训练成效保持（最佳回报略高），可以在这个基础上继续做实验。
+`Mjlab-SuperMimic-Flat-Sim2Real-Booster-Nemov3`（`nemov3_supermimic_env_cfg(sim2real=True)`）：AMP 实机最优选 Exp 90 的随机化
+（分组执行器延迟 0–50 ms、PD 增益 ×0.8–1.2、躯干质量 ±1 kg 与伪惯量、轮子摩擦、地面接触、关节偏置 ±0.015 rad、关节速度噪声
+±1.5）+ 推力（每 5–10 s，±0.2 m/s）+ 轮速目标截断 ±25 rad/s。每个随机量都写进世界模型的 sim context xi（24 → 93 维），
+推过的那一步不进世界模型的训练窗口。有执行器延迟时这一步执行的是缓冲里的旧指令，所以世界模型还输入前 3 步动作
+（runner 的 `wm_action_hist`，这个任务默认 3；论文没有）。详细设定、排查与取舍见调优记录 exp2、排查 1、exp3。
