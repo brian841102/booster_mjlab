@@ -38,6 +38,7 @@ _VECTOR_TERMS = {
     "base_lin_vel": (1.0, -1.0, 1.0),
     "command": (1.0, -1.0, -1.0),
     "gait_clock": (-1.0, -1.0),
+    "jump_command": (1.0, 1.0),  # (flag, phase): the same jump for the mirrored robot
 }
 _POLICY_GROUPS = ("actor", "critic")  # other groups (e.g. "amp") are not used by the PPO update: copied as is
 _cache: dict[tuple, tuple[torch.Tensor, torch.Tensor]] = {}
