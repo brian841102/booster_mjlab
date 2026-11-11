@@ -162,9 +162,14 @@ class AMP:
         num_amp_obs_steps: int,
         amp_replay_buffer_size: int = 200_000,
         amp_replay_insert_size: int = 1_000,
+        soft_condition: bool = False,
         device: torch.device | str = "cpu",
     ) -> None:
         self.device = torch.device(device)
+        # Speed-conditioned expert sampling (see MotionLoader.feed_forward_generator_soft_condition): the last AMP
+        # feature is a condition c in [0, 1] on the policy side; each expert sample takes c from a random policy sample
+        # and comes from the label-1 clips with probability c.
+        self.soft_condition = soft_condition
         self.discriminator = discriminator
         self.amp_loader = amp_loader
         self.amp_obs_dim = amp_obs_dim
@@ -307,10 +312,19 @@ class AMP:
             ):
                 yield torch.cat((current_batch, replay_batch), dim=0)
 
-        expert_generator = self.amp_loader.feed_forward_generator(
-            num_mini_batch=num_mini_batch,
-            mini_batch_size=mini_batch_size,
-        )
+        if self.soft_condition:
+            # Condition of each current policy sample = the last feature of its newest frame.
+            expert_generator = self.amp_loader.feed_forward_generator_soft_condition(
+                num_mini_batch=num_mini_batch,
+                mini_batch_size=mini_batch_size,
+                conditions=current[:, -1],
+                num_amp_obs_steps=self.num_amp_obs_steps,
+            )
+        else:
+            expert_generator = self.amp_loader.feed_forward_generator(
+                num_mini_batch=num_mini_batch,
+                mini_batch_size=mini_batch_size,
+            )
         return policy_generator(), expert_generator
 
     def compute_discriminator_batch(
@@ -449,6 +463,7 @@ def construct_amp(
         num_amp_obs_steps=num_amp_obs_steps,
         amp_replay_buffer_size=int(cfg["amp_replay_buffer_size"]),
         amp_replay_insert_size=int(cfg.get("amp_replay_insert_size", 1_000)),
+        soft_condition=bool(cfg.get("amp_soft_condition", False)),
         device=device,
     )
     return amp_runner, amp_obs_dim

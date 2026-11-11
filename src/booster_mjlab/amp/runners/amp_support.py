@@ -25,6 +25,8 @@ class AmpRunner:
             return False
 
         self.style_reward_weight = train_cfg["style_reward_weight"]
+        self._style_mask_command = train_cfg.get("style_mask_command")
+        self._style_mask_speed = train_cfg.get("style_mask_speed", 0.1)
         self.amp_group_names = list(amp_groups)
 
         # Per-environment episode sums for cumulative reward tracking.
@@ -50,6 +52,14 @@ class AmpRunner:
         """Match the environment's reward-rate scaling convention."""
         env = self.env.unwrapped
         return env.step_dt if env.cfg.scale_rewards_by_dt else 1.0
+
+    def _style_command_scale(self) -> torch.Tensor | float:
+        """Per-env factor min(1, command speed / style_mask_speed) on the style reward; 1 without style_mask_command."""
+        if self._style_mask_command is None:
+            return 1.0
+        command = self.env.unwrapped.command_manager.get_command(self._style_mask_command)
+        speed = torch.norm(command[:, :2], dim=1) + torch.abs(command[:, 2])
+        return (speed / self._style_mask_speed).clamp(max=1.0).to(self.device)
 
     def _get_amp_obs(self, obs: TensorDict) -> torch.Tensor:
         return torch.cat([obs[group] for group in self.amp_group_names], dim=-1)
@@ -88,6 +98,7 @@ class AmpRunner:
                 style_weight
                 * self._compute_style_reward_scale()
                 * self.alg.predict_style_reward(next_amp_history).view_as(rewards)
+                * self._style_command_scale()
             )
             # Per-env mask set by the env (e.g. 0 around a jump the reference clips do not contain; mdp/jump.py).
             style_mask = getattr(self.env.unwrapped, AMP_STYLE_MASK_ATTR, None)

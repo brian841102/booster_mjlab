@@ -61,6 +61,13 @@ class AmpOnPolicyRunnerCfg(RslRlOnPolicyRunnerCfg):
     """The configuration for the AMP discriminator."""
     style_reward_weight: float = 0.5
     """The weight of the style reward."""
+    style_mask_command: str | None = None
+    """Optional velocity command name: the style reward is scaled by min(1, command speed / ``style_mask_speed``) with
+    command speed = |(vx, vy)| + |wz|, i.e. no style reward while commanded to stand (the clips may contain no standing
+    still, so the discriminator would otherwise push a standing robot to keep stepping). The discriminator still trains
+    on standing samples. Off (scale 1) when None."""
+    style_mask_speed: float = 0.1
+    """Command speed [m/s, rad/s] from which the style reward is fully applied (see ``style_mask_command``)."""
     amp_replay_buffer_size: int = 200_000
     """The size of the AMP replay buffer."""
     amp_replay_insert_size: int = 1_000
@@ -83,6 +90,10 @@ class AmpOnPolicyRunnerCfg(RslRlOnPolicyRunnerCfg):
     """Optional ``module.path:function`` computing extra per-frame expert AMP features from a prepared clip
     (``MotionData -> (T, E)``), appended after the standard blocks. The env's AMP observation group must end with the
     matching policy-side term(s) of the same width."""
+    amp_soft_condition: bool = False
+    """Continuous speed condition (arXiv 2605.18611): the last AMP feature is a condition in [0, 1] on the policy
+    side and a {0, 1} clip label on the expert side; expert samples take the policy samples' conditions and come from
+    the label-1 clips with that probability (MotionLoader.feed_forward_generator_soft_condition)."""
     obs_groups: dict[str, tuple[str, ...]] = field(
         default_factory=lambda: {
             "actor": ("actor",),
